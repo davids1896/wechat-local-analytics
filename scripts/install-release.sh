@@ -11,13 +11,14 @@ DRY_RUN=0
 CLEANUP_DIR=""
 
 typeset -a INSTALL_ARGS
-INSTALL_ARGS=(--all --yes)
+INSTALL_ARGS=(--yes)
 
 usage() {
   cat <<'EOF'
 Usage:
   curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [installer args...]
+  ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
 
 Environment:
   WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-cli.

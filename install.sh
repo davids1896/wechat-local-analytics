@@ -214,10 +214,16 @@ print_human_result() {
   fi
   if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
     print
+    local verify_cmd
     if path_has_bin_dir; then
-      print "Next: run $APP_NAME sessions to verify end-to-end access."
+      verify_cmd="$APP_NAME sessions --limit 5 --pretty"
     else
-      print "Next: run $SHIM_PATH sessions to verify end-to-end access, or add $BIN_DIR to PATH."
+      verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
+    fi
+    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
+      print "Next: run $verify_cmd to verify WeChat data access."
+    else
+      print "Next: run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
     fi
     print "macOS quiet mode: add $INSTALL_DIR/$APP_NAME and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
   fi
@@ -225,6 +231,19 @@ print_human_result() {
 
 finish() {
   local ok="$1"
+  if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) && -z "$NEXT_ACTION" ]]; then
+    local verify_cmd
+    if path_has_bin_dir; then
+      verify_cmd="$APP_NAME sessions --limit 5 --pretty"
+    else
+      verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
+    fi
+    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
+      NEXT_ACTION="Run $verify_cmd to verify WeChat data access."
+    else
+      NEXT_ACTION="Run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
+    fi
+  fi
   if [[ "$JSON" -eq 1 ]]; then
     emit_json "$ok"
   else
@@ -716,9 +735,13 @@ classify_install_log_blocker() {
       BLOCKED_BY="full_disk_access"
       NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wechat-cli/wechat-cli and ~/.local/share/wechat-cli/wxkey, then rerun install."
       ;;
+    *"no keys found"*|*"usable DB key"*|*"found=0"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it still reports found=0 after updating wechat-cli, the current WeChat version is likely unsupported by wxkey; do not keep retrying setup."
+      ;;
     *"scan deadline exceeded"*|*"timed out after"*)
       BLOCKED_BY="key_scan_timeout"
-      NEXT_ACTION="Keep WeChat open, open the chats/pages that need decrypting, then rerun ./install.sh --bootstrap --refresh --yes --json. The previous scan timed out instead of hanging."
+      NEXT_ACTION="Keep WeChat open, open the chats/pages that need decrypting, then rerun $INSTALL_DIR/wxkey bootstrap. The previous scan timed out instead of hanging."
       ;;
     *"task_for_pid"*|*"not permitted"*)
       BLOCKED_BY="task_for_pid_denied"

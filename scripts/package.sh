@@ -1,14 +1,15 @@
 #!/bin/bash
 # Build a distribution zip: wechat-cli + wxkey binaries + local libWCDB.dylib +
-# install.sh + one-line bootstrap helper + docs. Friend/agent解压后跑
-# `./install.sh --all --yes --json` 即可完成 CLI 安装和 key/cache 初始化.
+# install.sh + one-line release helper + docs. Friend/agent 解压后跑
+# `./install.sh --yes --json` 安装 CLI；需要首次 key/cache 初始化时再跑
+# `./install.sh --all --yes --json`.
 # 如需兼容旧 MCP 客户端, 显式追加 `--mcp` 注册 `wechat-cli serve-mcp`.
 # 前提: 若目标机器没有现成 schema-2 key map, ./install.sh --all 会跑
 # ./wxkey bootstrap; 它会走 no-SIP + Keychain sudo + ad-hoc 重签路线完成首次
 # key 初始化. wechat-cli 运行时解密不要求关闭 SIP.
 set -euo pipefail
 
-VERSION="${1:-1.6.7}"
+VERSION="${1:-1.6.8}"
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRCDIR"
 

@@ -11,9 +11,16 @@ Do not use for:
 - sending messages, controlling the WeChat UI, Accessibility automation, Official Account publishing, Mini Program devtools, WeCom bots, or reply bots
 
 Install:
-- macOS: `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh`
-- Windows: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
+- macOS:
+  1. `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh`
+  2. `~/.local/share/wechat-cli/wxkey bootstrap`
+  3. `~/.local/bin/wechat-cli sessions --limit 5 --pretty`
+- Windows:
+  1. `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
+  2. `wechat-cli sessions --limit 5 --pretty`
 - Default install is CLI-only: no MCP registration, no watcher.
+- The final `sessions --limit 5 --pretty` command is the user-facing success test: `ok: true` plus recent sessions means install, key setup, and DB reads are working.
+- macOS first key setup is explicit and quality-first: `wxkey bootstrap` may take a couple of minutes; do not interrupt it just because the key scan is still running.
 - Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 
 Update:
