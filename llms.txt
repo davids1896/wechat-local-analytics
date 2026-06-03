@@ -21,6 +21,8 @@ Install:
 - Default install is CLI-only: no MCP registration, no watcher.
 - The final `sessions --limit 5 --pretty` command is the user-facing success test: `ok: true` plus recent sessions means install, key setup, and DB reads are working.
 - macOS first key setup is explicit and quality-first: `wxkey bootstrap` may take a couple of minutes; do not interrupt it just because the key scan is still running.
+- On WeChat 4.1.10+, `wxkey bootstrap` may first show passive scan `found=0` or `setup failed during bootstrap`, then continue into `PBKDF breakpoint fallback`; this is expected when the final output reaches `[OK] key config written`.
+- `PBKDF fallback got partial key coverage (24/26)` is not an install failure. It means most DB keys were captured and core chats are usually readable; verify with `wechat-cli sessions --limit 5 --pretty`, then open missing WeChat pages and rerun `wxkey bootstrap` or `wxkey doctor` only if specific data is missing.
 - Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 
 Update:
