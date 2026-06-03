@@ -735,9 +735,21 @@ classify_install_log_blocker() {
       BLOCKED_BY="full_disk_access"
       NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wechat-cli/wechat-cli and ~/.local/share/wechat-cli/wxkey, then rerun install."
       ;;
+    *"PBKDF diagnostics:"*"pbkdf_calls=0"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="Keep the LLDB-launched WeChat window logged in, open one normal chat so WeChat decrypts DBs, then rerun $INSTALL_DIR/wxkey bootstrap. On slow machines use WXKEY_PBKDF_PROBE_TIMEOUT=5m $INSTALL_DIR/wxkey bootstrap."
+      ;;
+    *"PBKDF diagnostics:"*"matching_db_salt_calls=0"*)
+      BLOCKED_BY="db_root_mismatch"
+      NEXT_ACTION="PBKDF ran but did not match the selected DB salts. Verify the WeChat account root, then rerun with WECHAT_CLI_DB_ROOT or $INSTALL_DIR/wxkey bootstrap --root pointing at the account directory that contains db_storage."
+      ;;
+    *"PBKDF diagnostics:"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="PBKDF saw matching salts but no usable key verified. Update wechat-cli, rerun $INSTALL_DIR/wxkey bootstrap, and if it still fails send the PBKDF diagnostics; this may be a WeChat derivation change."
+      ;;
     *"no keys found"*|*"usable DB key"*|*"found=0"*)
       BLOCKED_BY="key_not_found"
-      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it does not reach PBKDF fallback or [OK] key config written after updating wechat-cli and still repeats found=0, the current WeChat version is likely unsupported by wxkey; do not keep retrying setup."
+      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it reaches PBKDF fallback, read the PBKDF diagnostics to distinguish no DB decrypt, wrong DB root, or unsupported derivation."
       ;;
     *"scan deadline exceeded"*|*"timed out after"*)
       BLOCKED_BY="key_scan_timeout"

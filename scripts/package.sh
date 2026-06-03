@@ -9,7 +9,7 @@
 # key 初始化. wechat-cli 运行时解密不要求关闭 SIP.
 set -euo pipefail
 
-VERSION="${1:-1.6.9}"
+VERSION="${1:-1.6.10}"
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRCDIR"
 

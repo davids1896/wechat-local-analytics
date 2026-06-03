@@ -38,7 +38,7 @@ wechat-cli sessions --limit 5 --pretty
 
 macOS 的 `wxkey bootstrap` 是首次 key 初始化，可能要求输入一次 Mac admin 密码；密码只输入到本机隐藏提示，不要发给 agent 或网页。密码会存入用户 Keychain，供后续本机 key refresh 使用；`wxkey bootstrap` 也可能临时启动一个 wechat-cli 管理的 WeChat shadow copy 来完成 no-SIP 初始化。质量优先，不要因为这一步跑了一两分钟就手动中断。
 
-WeChat 4.1.10+ 上，`wxkey bootstrap` 可能先打印 passive scan 的 `found=0`，然后进入 `PBKDF breakpoint fallback`。这是预期路径，不等于失败；以最后是否出现 `[OK] key config written` 为准。如果提示 `partial key coverage (24/26)` 这类覆盖率不足，表示当前已打开/核心数据库可用，但还有少数 DB 没拿到 key；先跑 `wechat-cli sessions --limit 5 --pretty` 验证，只有在某些页面或媒体读不到时，再打开对应微信页面后重跑 `~/.local/share/wechat-cli/wxkey bootstrap` 或 `~/.local/share/wechat-cli/wxkey doctor`。
+WeChat 4.1.10+ 上，`wxkey bootstrap` 可能先打印 passive scan 的 `found=0`，然后进入 `PBKDF breakpoint fallback`。这是预期路径，不等于失败；以最后是否出现 `[OK] key config written` 为准。新版 fallback 默认最多等待 5 分钟，质量优先，不要在 LLDB 拉起的 WeChat 窗口还在登录或打开聊天时手动中断。如果提示 `partial key coverage (24/26)` 这类覆盖率不足，表示当前已打开/核心数据库可用，但还有少数 DB 没拿到 key；先跑 `wechat-cli sessions --limit 5 --pretty` 验证，只有在某些页面或媒体读不到时，再打开对应微信页面后重跑 `~/.local/share/wechat-cli/wxkey bootstrap` 或 `~/.local/share/wechat-cli/wxkey doctor`。
 
 ## 更新
 
@@ -158,9 +158,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
 | --- | --- |
 | 找不到会话 | 先用 `wechat-cli resolve-chat "名字"` 看候选，必要时在微信里打开对应聊天后重试 |
 | 提示缺 key | 确认微信已登录并打开过聊天；macOS agent 可跑 `wxkey doctor` / `wxkey setup` |
-| `wxkey bootstrap` 先显示 `found=0`、`setup failed during bootstrap`，随后进入 PBKDF fallback | WeChat 4.1.10+ 的正常 fallback 路径；不要在 fallback 运行中中断。最终出现 `[OK] key config written` 且 `wechat-cli sessions --limit 5 --pretty` 返回 `ok: true` 就算成功 |
+| `wxkey bootstrap` 先显示 `found=0` 或 `initial passive scan did not capture DB keys before its deadline`，随后进入 PBKDF fallback | WeChat 4.1.10+ 的正常 fallback 路径；不要在 fallback 运行中中断。最终出现 `[OK] key config written` 且 `wechat-cli sessions --limit 5 --pretty` 返回 `ok: true` 就算成功 |
 | `PBKDF fallback got partial key coverage (24/26)` | 不是安装失败；表示已拿到大部分 DB key，核心聊天通常可读。先用 `sessions` 验证；如果后续某些页面/媒体缺 key，打开对应微信页面后重跑 `wxkey bootstrap` 或 `wxkey doctor` |
-| 首次 key 初始化卡在 key scan | 新版会超时返回 `blocked_by=key_scan_timeout` 或 `blocked_by=key_not_found`，不会无限挂住；保持微信打开、点进目标聊天后重跑 `~/.local/share/wechat-cli/wxkey bootstrap`。如果没有进入 PBKDF fallback，或最终没有 `[OK] key config written` 且仍反复 `found=0`，通常是当前微信版本暂不被 wxkey 支持，不要继续重复 setup |
+| `PBKDF fallback found no keys` | 先看后面的 `PBKDF diagnostics`：`pbkdf_calls=0` 表示 LLDB 拉起的微信没有触发 DB 解密，保持该微信窗口登录并打开一个普通聊天后重跑；`pbkdf_calls>0` 但 `matching_db_salt_calls=0` 通常是 DB root/账号目录不匹配，改用正确的 `--root .../xwechat_files/<wxid>` 或 `WECHAT_CLI_DB_ROOT`；有匹配 salt 但仍没 key，可能是当前微信构建的派生逻辑变化，更新 wechat-cli 后仍失败再反馈诊断日志 |
+| 首次 key 初始化卡在 key scan | 新版会超时返回 `blocked_by=key_scan_timeout` 或 `blocked_by=key_not_found`，不会无限挂住；保持微信打开、点进目标聊天后重跑 `~/.local/share/wechat-cli/wxkey bootstrap`。如果进入 PBKDF fallback 但机器很慢，可用 `WXKEY_PBKDF_PROBE_TIMEOUT=5m ~/.local/share/wechat-cli/wxkey bootstrap` 明确放宽等待 |
 | macOS 频繁弹隐私授权 | 给 `wechat-cli` 和 `wxkey` 加 Full Disk Access |
 | 图片只有 warning 没 path | 微信本地只有 `.dat` 且 image key 仍不可用；打开原图或对应聊天后重试 |
 | Windows 初始化失败 | 确认 Windows 微信登录、`WECHAT_CLI_DB_ROOT` 指向直接包含 `db_storage` 的账号目录；极慢机器可设 `WECHAT_CLI_KEY_SCAN_TIMEOUT=5m` 后重试 |
@@ -177,7 +178,7 @@ go build -trimpath -o wechat-cli ./cmd/wechat-cli
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.9
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.10
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。
