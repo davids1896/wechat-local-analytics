@@ -27,11 +27,12 @@ func FindBinary() (string, error) {
 		}
 	}
 	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		for _, name := range binaryNames() {
-			cand := filepath.Join(dir, name)
-			if _, err := os.Stat(cand); err == nil {
-				return cand, nil
+		for _, dir := range executableSearchDirs(exe) {
+			for _, name := range binaryNames() {
+				cand := filepath.Join(dir, name)
+				if _, err := os.Stat(cand); err == nil {
+					return cand, nil
+				}
 			}
 		}
 	}
@@ -41,6 +42,24 @@ func FindBinary() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("wxkey binary not found — set $WX_KEY_BIN, install wxkey alongside wechat-cli, or put wxkey on PATH")
+}
+
+func executableSearchDirs(exe string) []string {
+	dirs := make([]string, 0, 2)
+	add := func(path string) {
+		dir := filepath.Dir(path)
+		for _, existing := range dirs {
+			if existing == dir {
+				return
+			}
+		}
+		dirs = append(dirs, dir)
+	}
+	add(exe)
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		add(resolved)
+	}
+	return dirs
 }
 
 // SetupResult mirrors what `wxkey setup` writes to stdout. We only consume

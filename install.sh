@@ -737,7 +737,7 @@ classify_install_log_blocker() {
       ;;
     *"no keys found"*|*"usable DB key"*|*"found=0"*)
       BLOCKED_BY="key_not_found"
-      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it still reports found=0 after updating wechat-cli, the current WeChat version is likely unsupported by wxkey; do not keep retrying setup."
+      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it does not reach PBKDF fallback or [OK] key config written after updating wechat-cli and still repeats found=0, the current WeChat version is likely unsupported by wxkey; do not keep retrying setup."
       ;;
     *"scan deadline exceeded"*|*"timed out after"*)
       BLOCKED_BY="key_scan_timeout"
