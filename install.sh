@@ -325,6 +325,72 @@ same_file() {
   [[ -e "$1" && -e "$2" && "$1" -ef "$2" ]]
 }
 
+sign_macho_ad_hoc() {
+  local macho_path="$1"
+  [[ "${OSTYPE:-}" == darwin* ]] || return 0
+  [[ -x /usr/bin/codesign ]] || return 0
+  run_logged /usr/bin/codesign --force --sign - "$macho_path" || return 1
+}
+
+atomic_install_path() {
+  local src="$1"
+  local dest="$2"
+  local mode="$3"
+  local sign="${4:-0}"
+  local label="${5:-$(basename "$dest")}"
+  local dir base tmp
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || die "create temporary install path for $label failed" 1
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "copy $label failed" 1
+  fi
+  if ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    die "chmod $label failed" 1
+  fi
+  if [[ "$sign" -eq 1 ]]; then
+    if ! sign_macho_ad_hoc "$tmp"; then
+      rm -f "$tmp"
+      die "codesign $label failed; see $INSTALL_LOG" 1
+    fi
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "install $label failed" 1
+  fi
+}
+
+build_install_go_binary() {
+  local src_dir="$1"
+  local pkg="$2"
+  local dest="$3"
+  local label="$4"
+  local dir base tmp
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || die "create temporary build path for $label failed" 1
+  if ! run_logged_in "$src_dir" env CGO_ENABLED=0 go build -o "$tmp" "$pkg"; then
+    rm -f "$tmp"
+    die "build $label failed; see $INSTALL_LOG" 1
+  fi
+  if ! chmod +x "$tmp"; then
+    rm -f "$tmp"
+    die "chmod $label failed" 1
+  fi
+  if ! sign_macho_ad_hoc "$tmp"; then
+    rm -f "$tmp"
+    die "codesign $label failed; see $INSTALL_LOG" 1
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "install $label failed" 1
+  fi
+}
+
 expand_path() {
   local p="$1"
   p="${p/#\~/$HOME}"
@@ -584,23 +650,28 @@ install_components() {
   mkdir -p "$INSTALL_DIR"
 
   if [[ "$CLI_MODE" == "build" ]]; then
-    run_logged_in "$CLI_SOURCE" env CGO_ENABLED=0 go build -o "$INSTALL_DIR/$APP_NAME" ./cmd/wechat-cli || die "build $APP_NAME failed; see $INSTALL_LOG" 1
+    build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$INSTALL_DIR/$APP_NAME" "$APP_NAME"
   else
-    cp "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" || die "copy $APP_NAME failed" 1
+    atomic_install_path "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" 755 1 "$APP_NAME"
   fi
-  chmod +x "$INSTALL_DIR/$APP_NAME"
 
   if [[ "$WXKEY_MODE" == "build" ]]; then
-    run_logged_in "$WXKEY_SOURCE" env CGO_ENABLED=0 go build -o "$INSTALL_DIR/wxkey" ./cmd/wxkey || die "build wxkey failed; see $INSTALL_LOG" 1
+    build_install_go_binary "$WXKEY_SOURCE" ./cmd/wxkey "$INSTALL_DIR/wxkey" "wxkey"
   elif [[ "$WXKEY_MODE" == "go-install" ]]; then
-    run_logged env CGO_ENABLED=0 GOBIN="$INSTALL_DIR" go install "$WXKEY_SOURCE" || die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
+    local gobin_tmp
+    gobin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-gobin.XXXXXX")" || die "create temporary wxkey install dir failed" 1
+    if ! run_logged env CGO_ENABLED=0 GOBIN="$gobin_tmp" go install "$WXKEY_SOURCE"; then
+      rm -rf "$gobin_tmp"
+      die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
+    fi
+    atomic_install_path "$gobin_tmp/wxkey" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
+    rm -rf "$gobin_tmp"
   else
-    cp "$WXKEY_SOURCE" "$INSTALL_DIR/wxkey" || die "copy wxkey failed" 1
+    atomic_install_path "$WXKEY_SOURCE" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
   fi
-  chmod +x "$INSTALL_DIR/wxkey"
 
   if [[ "$LIB_SOURCE" != "$INSTALL_DIR/libWCDB.dylib" ]]; then
-    cp "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" || die "copy libWCDB.dylib failed" 1
+    atomic_install_path "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" 644 1 "libWCDB.dylib"
   fi
 }
 

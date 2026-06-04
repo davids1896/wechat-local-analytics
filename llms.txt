@@ -25,6 +25,7 @@ Install:
 - PBKDF fallback stops existing WeChat first, then launches the original ad-hoc app or shadow app under LLDB so the debugged process is the only DB-decrypting instance.
 - If `PBKDF fallback found no keys`, inspect the following `PBKDF diagnostics`: `pbkdf_calls=0` means the LLDB-launched WeChat did not trigger DB decryption; `pbkdf_calls>0` with `matching_db_salt_calls=0` usually means wrong DB root/account; matched salts with no verified key suggests a WeChat derivation change or unsupported build.
 - `PBKDF fallback got partial key coverage (24/26)` is not an install failure. It means most DB keys were captured and core chats are usually readable; verify with `wechat-cli sessions --limit 5 --pretty`, then open missing WeChat pages and rerun `wxkey bootstrap` or `wxkey doctor` only if specific data is missing.
+- If `wechat-cli --help` immediately prints `zsh: killed`, reinstall/update with the latest release bootstrap. The macOS installer uses temporary files, ad-hoc codesign, and atomic rename so updates do not in-place overwrite the running Mach-O.
 - Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 
 Update:

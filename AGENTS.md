@@ -122,6 +122,12 @@ the normal CLI JSON envelope. On Windows it starts a background updater because
 Windows cannot overwrite the running `.exe`; inspect `data.log` if verification
 fails.
 
+If an installed macOS binary immediately prints `zsh: killed` even for
+`wechat-cli --help`, the existing CLI may not be able to self-update. Use the
+release bootstrap command below. Current macOS installers copy/build into a
+temporary file, ad-hoc codesign it, then atomically rename it into place so an
+update does not in-place overwrite the running Mach-O.
+
 For old installs that do not have `wechat-cli update` yet, run the release
 bootstrap again:
 
