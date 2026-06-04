@@ -737,7 +737,7 @@ classify_install_log_blocker() {
       ;;
     *"PBKDF diagnostics:"*"pbkdf_calls=0"*)
       BLOCKED_BY="key_not_found"
-      NEXT_ACTION="Keep the LLDB-launched WeChat window logged in, open one normal chat so WeChat decrypts DBs, then rerun $INSTALL_DIR/wxkey bootstrap. On slow machines use WXKEY_PBKDF_PROBE_TIMEOUT=5m $INSTALL_DIR/wxkey bootstrap."
+      NEXT_ACTION="Update wechat-cli, then rerun WXKEY_PBKDF_PROBE_TIMEOUT=5m $INSTALL_DIR/wxkey bootstrap. The latest PBKDF fallback stops existing WeChat before launching the debugged instance; keep that WeChat logged in and open one normal chat so DB decryption runs."
       ;;
     *"PBKDF diagnostics:"*"matching_db_salt_calls=0"*)
       BLOCKED_BY="db_root_mismatch"

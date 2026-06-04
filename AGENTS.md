@@ -64,9 +64,11 @@ Release zip contents:
   WeChat, sign a wechat-cli shadow copy, and store a wxkey sudo credential in
   Keychain.
 - On WeChat 4.1.10+, passive scan `found=0` can be followed by PBKDF fallback.
-  The fallback defaults to a 5-minute probe. If it prints `PBKDF diagnostics`,
-  use `pbkdf_calls`, `matching_db_salt_calls`, and `matching_mac_salt_calls` to
-  distinguish no DB decrypt, wrong account root, or unsupported derivation.
+  The fallback defaults to a 5-minute probe and stops existing WeChat before
+  launching the original ad-hoc app or shadow app under LLDB. If it prints
+  `PBKDF diagnostics`, use `pbkdf_calls`, `matching_db_salt_calls`, and
+  `matching_mac_salt_calls` to distinguish no DB decrypt, wrong account root,
+  or unsupported derivation.
 - macOS runtime DB reads and key refreshes do not require disabling SIP after
   `wxkey bootstrap` has stored the sudo credential and written a schema-2 key map.
 - Windows first key setup is built into `wechat-cli.exe cache refresh --force`.
