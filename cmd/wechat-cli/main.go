@@ -5670,6 +5670,19 @@ func (s *server) resolveLooseChatArg(a map[string]any) (string, error) {
 
 func (s *server) resolveLooseSenderArg(a map[string]any) (string, error) {
 	raw := strings.TrimSpace(getStr(a, "sender"))
+	if getBoolDefault(a, "from_me", false) || strings.EqualFold(raw, "me") || strings.EqualFold(raw, "self") {
+		if s != nil && s.cfg == nil {
+			cfg, err := config.Load()
+			if err != nil {
+				return "", err
+			}
+			s.cfg = cfg
+		}
+		if self := s.selfWxid(); self != "" {
+			return self, nil
+		}
+		return "", fmt.Errorf("from_me requires local account wxid; run `%s status --pretty` to inspect account readiness", appName)
+	}
 	if raw == "" || looksLikeRawChatID(raw) {
 		return raw, nil
 	}
@@ -6326,13 +6339,14 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		return nil, err
 	}
 	sender := ""
-	if getStr(a, "sender") != "" {
+	if getStr(a, "sender") != "" || getBoolDefault(a, "from_me", false) {
 		sender, err = s.resolveLooseSenderArg(a)
 		if err != nil {
 			return nil, err
 		}
 	}
 	limit := getInt(a, "limit", 20)
+	offset := getInt(a, "offset", 0)
 	like := "%" + kw + "%"
 
 	// search_mode is kept for compatibility, but all modes use WeChat's live
@@ -6390,9 +6404,9 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		subArgs = append(subArgs, ts)
 	}
 	whereSQL := strings.Join(subWhere, " AND ")
-	fetchLimit := limit
+	fetchLimit := limit + offset
 	if searchNeedsPostFilter(a) {
-		fetchLimit = limit * 20
+		fetchLimit = (limit + offset) * 20
 		if fetchLimit < 200 {
 			fetchLimit = 200
 		}
@@ -6434,10 +6448,22 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		[2]string{"sender_wxid", "sender_display_name"})
 	decorateMessageSearchRows(rows)
 	rows = filterLiveSearchRows(rows, a, sender)
-	if len(rows) > limit {
+	return sliceSearchRows(rows, offset, limit), nil
+}
+
+func sliceSearchRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset < len(rows) {
+		rows = rows[offset:]
+	} else {
+		return nil
+	}
+	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}
-	return rows, nil
+	return rows
 }
 
 func searchMode(a map[string]any) string {
@@ -6450,6 +6476,7 @@ func searchMode(a map[string]any) string {
 
 func searchNeedsPostFilter(a map[string]any) bool {
 	return firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type"), getStr(a, "sender")) != "" ||
+		getBoolDefault(a, "from_me", false) ||
 		getInt(a, "base_kind", 0) != 0
 }
 
@@ -7303,6 +7330,8 @@ func maxIntegerArg(tool, key string) (int64, bool) {
 		switch tool {
 		case "export_messages":
 			return 100000, true
+		case "search":
+			return 1000, true
 		case "sql":
 			return 1000, true
 		default:
@@ -7310,6 +7339,8 @@ func maxIntegerArg(tool, key string) (int64, bool) {
 		}
 	case "offset":
 		return 1000000, true
+	case "max_text_chars":
+		return 2000, true
 	default:
 		return 0, false
 	}
@@ -8140,6 +8171,9 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
 // selfWxid derives V's own wxid by stripping WeChat 4.x's _<4-hex> device
 // suffix from the config wxid. Returns empty if config wxid is unset.
 func (s *server) selfWxid() string {
+	if s == nil || s.cfg == nil {
+		return ""
+	}
 	raw := s.cfg.Wxid
 	if raw == "" {
 		return ""

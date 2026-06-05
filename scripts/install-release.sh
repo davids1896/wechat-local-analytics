@@ -1,11 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
-REPO="${WECHAT_CLI_REPO:-${WX_MCP_REPO:-https://github.com/r266-tech/wechat-cli}}"
-TAG="${WECHAT_CLI_RELEASE_TAG:-${WX_MCP_RELEASE_TAG:-latest}}"
-ASSET="${WECHAT_CLI_RELEASE_ASSET:-${WX_MCP_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}}"
-KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-${WX_MCP_KEEP_DOWNLOAD:-0}}"
-JSON="${WECHAT_CLI_INSTALL_JSON:-${WX_MCP_INSTALL_JSON:-0}}"
+REPO="${WECHAT_CLI_REPO:-https://github.com/r266-tech/wechat-cli}"
+TAG="${WECHAT_CLI_RELEASE_TAG:-latest}"
+ASSET="${WECHAT_CLI_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}"
+KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-0}"
+JSON="${WECHAT_CLI_INSTALL_JSON:-0}"
 MODE="install"
 DRY_RUN=0
 CLEANUP_DIR=""

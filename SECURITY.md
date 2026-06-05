@@ -9,7 +9,7 @@ The following files are intentionally local and must not be committed or shared:
 
 - `~/.config/wxcli/config.json`: contains the wxid, DB root, and DB key material.
 - `~/.wechat-cli/cache/`: contains plaintext snapshot DBs and `index.sqlite`.
-- macOS Keychain item `r266.wx-mcp.sudo`: contains the user's stored sudo password for unattended no-SIP key refresh.
+- macOS wxkey sudo credential in Keychain: contains the user's stored sudo password for unattended no-SIP key refresh.
 - `dist/`, `wechat-cli`, `wxkey`, and local `libWCDB.dylib` build artifacts.
 
 The repository `.gitignore` excludes the common local artifacts, but users should

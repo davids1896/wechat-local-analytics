@@ -2,10 +2,10 @@ param(
   [switch]$DryRun,
   [switch]$Json,
   [switch]$Update,
-  [string]$Repo = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_REPO)) { $env:WECHAT_CLI_REPO } else { $env:WX_MCP_REPO }),
-  [string]$Tag = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_TAG)) { $env:WECHAT_CLI_RELEASE_TAG } else { $env:WX_MCP_RELEASE_TAG }),
-  [string]$Asset = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_ASSET)) { $env:WECHAT_CLI_RELEASE_ASSET } else { $env:WX_MCP_RELEASE_ASSET }),
-  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
+  [string]$Repo = $env:WECHAT_CLI_REPO,
+  [string]$Tag = $env:WECHAT_CLI_RELEASE_TAG,
+  [string]$Asset = $env:WECHAT_CLI_RELEASE_ASSET,
+  [string]$InstallDir = $env:WECHAT_CLI_INSTALL_DIR,
   [switch]$All,
   [switch]$BackgroundRefresh,
   [switch]$KeepDownload
@@ -16,8 +16,8 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = "https://github.com/r266-tech/wechat-cli" }
 if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "latest" }
 if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wechat-cli-latest-windows-amd64.zip" }
-if ($env:WECHAT_CLI_INSTALL_JSON -eq "1" -or $env:WX_MCP_INSTALL_JSON -eq "1") { $Json = $true }
-if ($env:WECHAT_CLI_KEEP_DOWNLOAD -eq "1" -or $env:WX_MCP_KEEP_DOWNLOAD -eq "1") { $KeepDownload = $true }
+if ($env:WECHAT_CLI_INSTALL_JSON -eq "1") { $Json = $true }
+if ($env:WECHAT_CLI_KEEP_DOWNLOAD -eq "1") { $KeepDownload = $true }
 
 function Write-Step([string]$Text) {
   if ($Json) {

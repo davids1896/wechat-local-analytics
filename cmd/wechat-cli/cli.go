@@ -48,6 +48,17 @@ type cliCommandSpec struct {
 	Examples    []string `json:"examples,omitempty"`
 }
 
+func (s cliCommandSpec) MarshalJSON() ([]byte, error) {
+	type alias cliCommandSpec
+	return json.Marshal(struct {
+		Name string `json:"name"`
+		alias
+	}{
+		Name:  s.Command,
+		alias: alias(s),
+	})
+}
+
 var cliCommandSpecs = []cliCommandSpec{
 	{Command: "tools", Aliases: []string{"list-tools", "list_tools"}, Usage: appName + " tools [--profile assistant|maintenance|all]", Description: "List tool schemas. Defaults to the high-signal assistant surface; use --profile all for every compatibility/maintenance tool.", Examples: []string{appName + " tools", appName + " tools --profile all"}},
 	{Command: "agent", Aliases: []string{"read-os", "read_os", "os"}, Tool: "read_os", Usage: appName + " agent [--mode overview|coverage|workflows|status]", Description: "Agent-first WeChat Read OS entrypoint: capability map, workflows, coverage matrix, and readiness status.", Examples: []string{appName + " agent --pretty", appName + " agent --mode coverage --pretty"}},
@@ -104,6 +115,12 @@ func maybeRunCLI(args []string) bool {
 	switch args[0] {
 	case "-h", "--help", "help":
 		runCLIHelp(strings.Join(args[1:], " "), opts)
+		return true
+	case "-v", "--version", "version":
+		writeCLISuccess("version", "version", map[string]any{
+			"name":    appName,
+			"version": appVersion,
+		}, opts)
 		return true
 	case "tools", "list-tools", "list_tools":
 		runToolsCLI(args[1:], opts)
@@ -475,8 +492,8 @@ func runTailCLI(flags map[string]any, opts cliOptions, command string) {
 			exitCLIError(opts, 1, "tool_error", err.Error(), "read_events", command)
 		}
 		env, _ := result.(map[string]any)
-		for _, event := range mapSliceAny(env["events"]) {
-			_ = enc.Encode(event)
+		if err := writeReadEventsJSONL(enc, env); err != nil {
+			exitCLIError(opts, 1, "io_error", err.Error(), "read_events", command)
 		}
 		if cursor := rowString(wcdb.Row(env), "cursor"); cursor != "" {
 			flags["cursor"] = cursor
@@ -486,6 +503,15 @@ func runTailCLI(flags map[string]any, opts cliOptions, command string) {
 		}
 		time.Sleep(readEventsPollInterval(flags))
 	}
+}
+
+func writeReadEventsJSONL(enc *json.Encoder, env map[string]any) error {
+	for _, event := range mapSliceAny(env["events"]) {
+		if err := enc.Encode(event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cliAgentDataEnvelope(tool, command string, args map[string]any, result any) any {
@@ -503,7 +529,7 @@ func cliAgentDataEnvelope(tool, command string, args map[string]any, result any)
 	return compactMap(map[string]any{
 		"query":     cliResultQueryMeta(tool, command, args, rows),
 		"freshness": cliResultFreshnessMeta(tool),
-		listKey:     cliResultRowsForTool(tool, rows),
+		listKey:     cliResultRowsForTool(tool, args, rows),
 	})
 }
 
@@ -522,13 +548,13 @@ func cliResultRows(result any) ([]map[string]any, bool) {
 	}
 }
 
-func cliResultRowsForTool(tool string, rows []map[string]any) []map[string]any {
+func cliResultRowsForTool(tool string, args map[string]any, rows []map[string]any) []map[string]any {
 	if tool != "search" {
 		return rows
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, cliSearchMessageRow(row))
+		out = append(out, cliSearchMessageRow(row, args))
 	}
 	return out
 }
@@ -544,8 +570,18 @@ func cliResultFreshnessMeta(tool string) map[string]any {
 	return nil
 }
 
-func cliSearchMessageRow(row map[string]any) map[string]any {
+func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any {
 	createTime := int64MapValue(row, "create_time")
+	text := firstNonEmpty(stringMapValue(row, "content_summary"), stringMapValue(row, "content"))
+	match := stringMapValue(row, "content")
+	maxChars := getInt(args, "max_text_chars", 0)
+	if getBoolDefault(args, "snippet_only", false) && maxChars == 0 {
+		maxChars = 180
+	}
+	if maxChars > 0 {
+		text = truncateRunes(text, maxChars)
+		match = truncateRunes(match, maxChars)
+	}
 	out := compactMap(map[string]any{
 		"id": compactMap(map[string]any{
 			"local_id": row["local_id"],
@@ -562,10 +598,25 @@ func cliSearchMessageRow(row map[string]any) map[string]any {
 			"chat_type":    row["chat_type"],
 		}),
 		"kind":  row["kind_name"],
-		"text":  firstNonEmpty(stringMapValue(row, "content_summary"), stringMapValue(row, "content")),
-		"match": stringMapValue(row, "content"),
+		"text":  text,
+		"match": match,
 	})
+	if !getBoolDefault(args, "include_text", true) {
+		delete(out, "text")
+		delete(out, "match")
+	}
 	return out
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 func cliFormatUnixISO(ts int64) string {
@@ -972,7 +1023,7 @@ func parseKVFlags(args []string) map[string]any {
 
 func isBoolCLIFlag(key string) bool {
 	switch key {
-	case "background", "debug", "follow", "force", "friends_only", "groups_only", "include_anchor", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "include_status", "jsonl", "stats":
+	case "background", "debug", "follow", "force", "friends_only", "from_me", "groups_only", "include_anchor", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "include_status", "include_text", "jsonl", "snippet_only", "stats":
 		return true
 	default:
 		return false

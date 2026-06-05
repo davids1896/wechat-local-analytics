@@ -8,11 +8,11 @@
 # key 初始化. wechat-cli 运行时解密不要求关闭 SIP.
 set -euo pipefail
 
-VERSION="${1:-1.6.13}"
+VERSION="${1:-1.6.14}"
 SRCDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SRCDIR"
 
-DYLIB_SRC="${WECHAT_CLI_WCDB_DYLIB:-${WX_MCP_WCDB_DYLIB:-$SRCDIR/lib/libWCDB.dylib}}"
+DYLIB_SRC="${WECHAT_CLI_WCDB_DYLIB:-$SRCDIR/lib/libWCDB.dylib}"
 if [[ ! -f "$DYLIB_SRC" ]]; then
   echo "ERROR: libWCDB.dylib missing — set WECHAT_CLI_WCDB_DYLIB or place it at $SRCDIR/lib/libWCDB.dylib" >&2
   exit 1

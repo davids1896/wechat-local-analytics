@@ -189,6 +189,22 @@ func TestParseGlobalCLIOptionsStrictReadOnly(t *testing.T) {
 	}
 }
 
+func TestCLIVersionCommand(t *testing.T) {
+	out := captureStdout(t, func() {
+		if !maybeRunCLI([]string{"--version"}) {
+			t.Fatal("--version was not handled by CLI")
+		}
+	})
+	var env cliSuccessEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("version output is not success envelope: %v\n%s", err, string(out))
+	}
+	data, ok := env.Data.(map[string]any)
+	if !ok || data["name"] != appName || data["version"] != appVersion {
+		t.Fatalf("version data = %#v", env.Data)
+	}
+}
+
 func TestCLIHelpDocumentForCommand(t *testing.T) {
 	raw := cliHelpDocument("timeline")
 	doc, ok := raw.(map[string]any)
@@ -205,6 +221,41 @@ func TestCLIHelpDocumentForCommand(t *testing.T) {
 	}
 }
 
+func TestRootHelpCommandsExposeStableNameField(t *testing.T) {
+	out := captureStdout(t, func() {
+		runCLIHelp("", cliOptions{})
+	})
+	var env cliSuccessEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("help output is not success envelope: %v\n%s", err, string(out))
+	}
+	doc, ok := env.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("help data = %#v", env.Data)
+	}
+	commands, ok := doc["commands"].([]any)
+	if !ok || len(commands) == 0 {
+		t.Fatalf("commands = %#v", doc["commands"])
+	}
+	seen := map[string]bool{}
+	for _, raw := range commands {
+		cmd, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("command entry = %#v", raw)
+		}
+		if cmd["name"] == nil || cmd["command"] == nil || cmd["name"] != cmd["command"] {
+			t.Fatalf("command entry missing stable name/command: %#v", cmd)
+		}
+		seen[fmt.Sprint(cmd["name"])] = true
+	}
+	if seen["serve-mcp"] {
+		t.Fatalf("help still exposes serve-mcp: %#v", seen)
+	}
+	if !seen["tail"] {
+		t.Fatalf("help does not expose tail command: %#v", seen)
+	}
+}
+
 func TestCLIHelpDocumentForUpdateCommand(t *testing.T) {
 	raw := cliHelpDocument("update")
 	doc, ok := raw.(map[string]any)
@@ -217,6 +268,120 @@ func TestCLIHelpDocumentForUpdateCommand(t *testing.T) {
 	}
 	if _, ok := doc["tool"]; ok {
 		t.Fatalf("update help should not expose a tool schema: %#v", doc["tool"])
+	}
+}
+
+func TestReadEventsCursorAndJSONLHelpers(t *testing.T) {
+	args := map[string]any{"cursor": "local_id:42"}
+	applyReadEventsCursor(args, getStr(args, "cursor"))
+	if args["after_message"] != int64(42) {
+		t.Fatalf("after_message = %#v, want 42", args["after_message"])
+	}
+	if cursor := readEventsCursorFromMessageID(map[string]any{"local_id": int64(43)}); cursor != "local_id:43" {
+		t.Fatalf("cursor = %q, want local_id:43", cursor)
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	env := map[string]any{
+		"events": []map[string]any{
+			{"type": "message", "cursor": "local_id:43"},
+			{"type": "message", "cursor": "local_id:44"},
+		},
+	}
+	if err := writeReadEventsJSONL(enc, env); err != nil {
+		t.Fatalf("writeReadEventsJSONL error: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"local_id:43"`) || !strings.Contains(lines[1], `"local_id:44"`) {
+		t.Fatalf("jsonl output = %q", buf.String())
+	}
+}
+
+func TestResolveLooseSenderSupportsMeAlias(t *testing.T) {
+	srv := &server{cfg: &config.Config{Wxid: "wxid_3qqa0aja1kf612_f06d"}}
+	got, err := srv.resolveLooseSenderArg(map[string]any{"sender": "me"})
+	if err != nil {
+		t.Fatalf("sender=me error: %v", err)
+	}
+	if got != "wxid_3qqa0aja1kf612" {
+		t.Fatalf("sender=me resolved %q", got)
+	}
+	got, err = srv.resolveLooseSenderArg(map[string]any{"from_me": true})
+	if err != nil {
+		t.Fatalf("from_me error: %v", err)
+	}
+	if got != "wxid_3qqa0aja1kf612" {
+		t.Fatalf("from_me resolved %q", got)
+	}
+}
+
+func TestSearchRowsOffsetAndLimit(t *testing.T) {
+	rows := []wcdb.Row{
+		{"local_id": int64(1)},
+		{"local_id": int64(2)},
+		{"local_id": int64(3)},
+	}
+	got := sliceSearchRows(rows, 1, 1)
+	if len(got) != 1 || rowInt64(got[0], "local_id") != 2 {
+		t.Fatalf("sliceSearchRows = %#v", got)
+	}
+	if got := sliceSearchRows(rows, 5, 1); len(got) != 0 {
+		t.Fatalf("sliceSearchRows past end = %#v", got)
+	}
+}
+
+func TestCLISearchMessageRowCanTrimText(t *testing.T) {
+	row := map[string]any{
+		"local_id":            int64(1),
+		"talker":              "room@chatroom",
+		"talker_display_name": "Room",
+		"chat_type":           "group",
+		"create_time":         int64(1776330000),
+		"sender_wxid":         "wxid_a",
+		"sender_display_name": "Alice",
+		"kind_name":           "text",
+		"content":             "不是ABCDEFG而是HIJKLMN",
+	}
+	got := cliSearchMessageRow(row, map[string]any{"snippet_only": true, "max_text_chars": int64(4)})
+	if got["text"] != "不是AB" || got["match"] != "不是AB" {
+		t.Fatalf("trimmed row = %#v", got)
+	}
+	got = cliSearchMessageRow(row, map[string]any{"include_text": false})
+	if _, ok := got["text"]; ok {
+		t.Fatalf("include_text=false leaked text: %#v", got)
+	}
+	if _, ok := got["match"]; ok {
+		t.Fatalf("include_text=false leaked match: %#v", got)
+	}
+}
+
+func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
+	if err := validateToolArgs("search", map[string]any{"keyword": "x", "limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
+		t.Fatalf("search limit validation error = %v", err)
+	}
+	if err := validateToolArgs("search", map[string]any{"keyword": "x", "max_text_chars": int64(2001)}); err == nil || !strings.Contains(err.Error(), "maximum is 2000") {
+		t.Fatalf("max_text_chars validation error = %v", err)
+	}
+}
+
+func TestReadRegressionScriptRequiresExplicitInputs(t *testing.T) {
+	script := filepath.Join("..", "..", "scripts", "wechat-read-regression.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("regression script unavailable: %v", err)
+	}
+	cmd := exec.Command("bash", script)
+	cmd.Env = append(os.Environ(),
+		"WECHAT_CLI_BIN=true",
+		"WECHAT_READ_TEST_CHAT=",
+		"WECHAT_READ_TEST_KEYWORD=",
+		"WECHAT_READ_TEST_OUT="+t.TempDir(),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("regression script unexpectedly succeeded:\n%s", string(out))
+	}
+	if !strings.Contains(string(out), "set WECHAT_READ_TEST_CHAT and WECHAT_READ_TEST_KEYWORD explicitly") {
+		t.Fatalf("regression script output = %s", string(out))
 	}
 }
 
@@ -1489,6 +1654,32 @@ func TestAgentForwardChatWarnsWhenNestedMediaUnresolved(t *testing.T) {
 	warnings := stringSliceAny(items[0]["warnings"])
 	if len(warnings) != 1 || warnings[0] != "forward_image_not_resolved" {
 		t.Fatalf("forward item warnings = %#v", items[0]["warnings"])
+	}
+}
+
+func TestAgentForwardChatWarnsWhenVoiceAndFileUnresolved(t *testing.T) {
+	rows := []wcdb.Row{{
+		"kind_name":       "forward_chat",
+		"content_summary": "群聊的聊天记录",
+		"message_content_parsed": map[string]any{
+			"title": "群聊的聊天记录",
+			"forward_items": []wxparse.ForwardItem{
+				{DataType: 3, SourceName: "V", DataTitle: "语音", DataFmt: "silk"},
+				{DataType: 8, SourceName: "V", DataTitle: "report.pdf", DataFmt: "pdf", DataSize: 123},
+			},
+		},
+	}}
+
+	got := agentMessages(rows)
+	forward := got[0]["forward_chat"].(map[string]any)
+	items := forward["items"].([]map[string]any)
+	voiceWarnings := stringSliceAny(items[0]["warnings"])
+	if len(voiceWarnings) != 1 || voiceWarnings[0] != "forward_voice_not_resolved" {
+		t.Fatalf("voice warnings = %#v; item=%#v", items[0]["warnings"], items[0])
+	}
+	fileWarnings := stringSliceAny(items[1]["warnings"])
+	if len(fileWarnings) != 1 || fileWarnings[0] != "forward_file_not_resolved" {
+		t.Fatalf("file warnings = %#v; item=%#v", items[1]["warnings"], items[1])
 	}
 }
 

@@ -82,7 +82,7 @@ Release zip contents:
   directory exists, otherwise `%USERPROFILE%\.local\bin\wechat-cli.cmd`.
 - State/cache dir defaults to `~/.wechat-cli`.
 - Key config remains wxkey-compatible at `~/.config/wxcli/config.json`.
-- Preferred env prefix is `WECHAT_CLI_*`; legacy `WX_MCP_*` aliases still work.
+- Preferred env prefix is `WECHAT_CLI_*`.
 
 ## macOS Password Step
 
@@ -178,8 +178,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Pu
 
 `--uninstall` removes installed files and watcher plist while preserving
 key/state unless `--purge-state` is passed. `--clear-state` removes user state:
-`~/.config/wxcli/config.json`, `~/.wechat-cli`, legacy `~/.wx-mcp`, logs, the
-stored wxkey sudo credential, and any watcher that would recreate state.
+`~/.config/wxcli/config.json`, `~/.wechat-cli`, legacy state directories, logs,
+the stored wxkey sudo credential, and any watcher that would recreate state.
 
 Do not ask the user to manually delete key config, cache directories, logs, or
 Keychain credentials.

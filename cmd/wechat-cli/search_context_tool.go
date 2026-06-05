@@ -31,7 +31,7 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 	hits := make([]map[string]any, 0, len(rows))
 	contextsReturned := 0
 	for i, row := range rows {
-		msg := cliSearchMessageRow(map[string]any(row))
+		msg := cliSearchMessageRow(map[string]any(row), a)
 		msg["context_role"] = "search_hit"
 		hit := map[string]any{
 			"anchor_id": msg["id"],

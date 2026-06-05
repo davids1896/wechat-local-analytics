@@ -10,8 +10,8 @@ param(
   [switch]$Refresh,
   [switch]$BackgroundRefresh,
   [switch]$Doctor,
-  [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
-  [string]$BinDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_BIN_DIR)) { $env:WECHAT_CLI_BIN_DIR } else { $env:WX_MCP_BIN_DIR })
+  [string]$InstallDir = $env:WECHAT_CLI_INSTALL_DIR,
+  [string]$BinDir = $env:WECHAT_CLI_BIN_DIR
 )
 
 $ErrorActionPreference = "Stop"
@@ -146,8 +146,6 @@ function Resolve-WcdbDll {
   $candidates = @()
   if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_LIB)) { $candidates += $env:WECHAT_CLI_WCDB_LIB }
   if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_WCDB_DYLIB)) { $candidates += $env:WECHAT_CLI_WCDB_DYLIB }
-  if (-not [string]::IsNullOrWhiteSpace($env:WX_MCP_WCDB_LIB)) { $candidates += $env:WX_MCP_WCDB_LIB }
-  if (-not [string]::IsNullOrWhiteSpace($env:WX_MCP_WCDB_DYLIB)) { $candidates += $env:WX_MCP_WCDB_DYLIB }
   $candidates += (Join-Path $SourceDir "libWCDB.dll")
   $candidates += (Join-Path $SourceDir "WCDB.dll")
   $candidates += (Join-Path $SourceDir "lib\libWCDB.dll")
@@ -515,7 +513,7 @@ try {
   } elseif ($message -match "no usable Windows WeChat raw keys") {
     $blockedBy = "key_scan_failed"
     $nextAction = "Verify WECHAT_CLI_DB_ROOT belongs to the logged-in Windows WeChat account; if multiple WeChat processes exist, set WECHAT_CLI_WECHAT_PID and rerun install.ps1 -All -Yes -Json."
-  } elseif ($message -match "no account directory with db_storage|WECHAT_CLI_DB_ROOT|WX_MCP_DB_ROOT") {
+  } elseif ($message -match "no account directory with db_storage|WECHAT_CLI_DB_ROOT") {
     $blockedBy = "db_root_not_found"
     $nextAction = "Set WECHAT_CLI_DB_ROOT to the WeChat account directory that directly contains db_storage, then rerun install.ps1 -All -Yes -Json."
   } elseif ($message -match "WCDB DLL") {

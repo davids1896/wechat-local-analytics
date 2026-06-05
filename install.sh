@@ -6,9 +6,9 @@ LEGACY_APP_NAME="wx-mcp"
 WATCHER_LABEL="com.r266.wechat-cli-cache-watcher"
 LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
 SOURCE_DIR="${0:A:h}"
-INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-${WX_MCP_INSTALL_DIR:-$HOME/.local/share/wechat-cli}}"
+INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-$HOME/.local/share/wechat-cli}"
 LEGACY_INSTALL_DIR="$HOME/.local/share/wx-mcp"
-BIN_DIR="${WECHAT_CLI_BIN_DIR:-${WX_MCP_BIN_DIR:-$HOME/.local/bin}}"
+BIN_DIR="${WECHAT_CLI_BIN_DIR:-$HOME/.local/bin}"
 SHIM_PATH="$BIN_DIR/$APP_NAME"
 LOG_DIR="${WECHAT_CLI_LOG_DIR:-$HOME/Library/Logs/wechat-cli}"
 INSTALL_LOG="$LOG_DIR/install.log"
@@ -83,14 +83,14 @@ Install options:
   --doctor                  Check local install prerequisites/status.
   --uninstall               Remove installed files and watcher plist.
   --purge-state             With --uninstall, also remove wechat-cli state:
-                            ~/.config/wxcli/config.json, ~/.wechat-cli, legacy ~/.wx-mcp, logs,
-                            and the wxkey Keychain sudo credential.
+                            ~/.config/wxcli/config.json, ~/.wechat-cli, legacy state dirs,
+                            logs, and the wxkey Keychain sudo credential.
   --clear-state             Only remove wechat-cli state; keep installed binaries.
 
 Environment:
-  WECHAT_CLI_INSTALL_DIR    Override install directory. WX_MCP_INSTALL_DIR still works.
-  WECHAT_CLI_BIN_DIR        Override CLI command shim directory. WX_MCP_BIN_DIR still works.
-  WECHAT_CLI_WCDB_DYLIB     Existing libWCDB.dylib to copy. WX_MCP_WCDB_DYLIB still works.
+  WECHAT_CLI_INSTALL_DIR    Override install directory.
+  WECHAT_CLI_BIN_DIR        Override CLI command shim directory.
+  WECHAT_CLI_WCDB_DYLIB     Existing libWCDB.dylib to copy.
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
   WXKEY_GO_INSTALL          Go package/version for source fallback
@@ -562,7 +562,7 @@ resolve_components() {
   fi
 
   local cand
-  for cand in "${WECHAT_CLI_WCDB_DYLIB:-}" "${WX_MCP_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib" "$LEGACY_INSTALL_DIR/libWCDB.dylib"; do
+  for cand in "${WECHAT_CLI_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib" "$LEGACY_INSTALL_DIR/libWCDB.dylib"; do
     if [[ -f "$cand" ]]; then
       LIB_SOURCE="$cand"
       break
@@ -723,7 +723,7 @@ run_cache_refresh() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return
   fi
-  if [[ "${WECHAT_CLI_INSTALL_SYNC_REFRESH:-${WX_MCP_INSTALL_SYNC_REFRESH:-0}}" == "1" ]]; then
+  if [[ "${WECHAT_CLI_INSTALL_SYNC_REFRESH:-0}" == "1" ]]; then
     ACTIONS+=("run wechat-cli metadata cache refresh in foreground because WECHAT_CLI_INSTALL_SYNC_REFRESH=1")
     run_logged "$INSTALL_DIR/$APP_NAME" cache refresh || die "metadata cache refresh failed; see $INSTALL_LOG" 1
     INSTALL_STATUS="ready"
@@ -895,7 +895,7 @@ queue_purge_state_actions() {
   ACTIONS+=("remove legacy wx-mcp state dir $HOME/.wx-mcp")
   ACTIONS+=("remove wechat-cli logs $LOG_DIR")
   ACTIONS+=("remove legacy wx-mcp logs $HOME/Library/Logs/wx-mcp")
-  ACTIONS+=("delete Keychain generic password r266.wx-mcp.sudo for account $(sudo_keychain_account)")
+  ACTIONS+=("delete legacy wxkey sudo Keychain credential for account $(sudo_keychain_account)")
 }
 
 run_purge_state() {
