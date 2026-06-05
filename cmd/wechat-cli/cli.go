@@ -617,6 +617,37 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 	return out
 }
 
+func applyAgentTextOutputOptions(messages []map[string]any, args map[string]any) {
+	for _, msg := range messages {
+		applyAgentMessageTextOutputOptions(msg, args)
+	}
+}
+
+func applyAgentMessageTextOutputOptions(msg map[string]any, args map[string]any) {
+	if msg == nil {
+		return
+	}
+	text, ok := msg["text"].(string)
+	if !ok {
+		return
+	}
+	originalTextChars := len([]rune(text))
+	maxChars := getInt(args, "max_text_chars", 0)
+	if getBoolDefault(args, "snippet_only", false) && maxChars == 0 {
+		maxChars = 180
+	}
+	if maxChars > 0 {
+		textTruncated := len([]rune(text)) > maxChars
+		msg["text"] = truncateRunes(text, maxChars)
+		msg["original_text_chars"] = originalTextChars
+		msg["text_truncated"] = textTruncated
+	}
+	if !getBoolDefault(args, "include_text", true) {
+		delete(msg, "text")
+		msg["original_text_chars"] = originalTextChars
+	}
+}
+
 func truncateRunes(s string, max int) string {
 	if max <= 0 {
 		return s
@@ -633,6 +664,14 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func queryFromMeArg(args map[string]any) bool {
+	if getBoolDefault(args, "from_me", false) {
+		return true
+	}
+	sender := strings.ToLower(strings.TrimSpace(getStr(args, "sender")))
+	return sender == "me" || sender == "self"
 }
 
 func cliFormatUnixISO(ts int64) string {
@@ -689,7 +728,7 @@ func cliResultQueryMeta(tool, command string, args map[string]any, rows []map[st
 		"keyword":     getStr(args, "keyword"),
 		"type":        firstNonEmpty(getStr(args, "type"), getStr(args, "kind_name"), getStr(args, "type_filter"), getStr(args, "filter")),
 		"sender":      getStr(args, "sender"),
-		"from_me":     getBoolDefault(args, "from_me", false),
+		"from_me":     queryFromMeArg(args),
 		"after":       getStr(args, "after"),
 		"before":      getStr(args, "before"),
 		"limit":       limit,

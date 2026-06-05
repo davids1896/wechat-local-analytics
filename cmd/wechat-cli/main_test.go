@@ -361,6 +361,23 @@ func TestCLISearchMessageRowCanTrimText(t *testing.T) {
 	}
 }
 
+func TestAgentMessageTextOutputOptionsCanTrimContextRows(t *testing.T) {
+	rows := []map[string]any{
+		{"id": map[string]any{"local_id": int64(1)}, "text": "不是ABCDEFG而是HIJKLMN"},
+	}
+	applyAgentTextOutputOptions(rows, map[string]any{"snippet_only": true, "max_text_chars": int64(4)})
+	if rows[0]["text"] != "不是AB" {
+		t.Fatalf("trimmed context text = %#v", rows[0])
+	}
+	if rows[0]["text_truncated"] != true || rows[0]["original_text_chars"] == nil {
+		t.Fatalf("context truncation metadata = %#v", rows[0])
+	}
+	applyAgentTextOutputOptions(rows, map[string]any{"include_text": false})
+	if _, ok := rows[0]["text"]; ok {
+		t.Fatalf("include_text=false leaked context text: %#v", rows[0])
+	}
+}
+
 func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
 	if err := validateToolArgs("search", map[string]any{"keyword": "x", "limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
 		t.Fatalf("search limit validation error = %v", err)
@@ -370,6 +387,15 @@ func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
 	}
 	if err := validateToolArgs("search", map[string]any{"keyword": "x", "max_text_chars": int64(2001)}); err == nil || !strings.Contains(err.Error(), "maximum is 2000") {
 		t.Fatalf("max_text_chars validation error = %v", err)
+	}
+	if err := validateToolArgs("search_with_context", map[string]any{"keyword": "x", "max_text_chars": int64(2001)}); err == nil || !strings.Contains(err.Error(), "maximum is 2000") {
+		t.Fatalf("search_with_context max_text_chars validation error = %v", err)
+	}
+	if err := validateToolArgs("read_events", map[string]any{"limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
+		t.Fatalf("read_events limit validation error = %v", err)
+	}
+	if err := validateToolArgs("read_events", map[string]any{"scan_limit": int64(5001)}); err == nil || !strings.Contains(err.Error(), "maximum is 5000") {
+		t.Fatalf("read_events scan_limit validation error = %v", err)
 	}
 }
 
@@ -382,9 +408,17 @@ func TestSearchQueryMetaEchoesFromMe(t *testing.T) {
 	if meta["from_me"] != true {
 		t.Fatalf("query meta did not echo from_me: %#v", meta)
 	}
+	meta = cliResultQueryMeta("search", "search", map[string]any{
+		"keyword": "不是",
+		"sender":  "self",
+		"limit":   int64(2),
+	}, []map[string]any{{"local_id": int64(1)}})
+	if meta["from_me"] != true {
+		t.Fatalf("query meta did not resolve sender=self: %#v", meta)
+	}
 }
 
-func TestSearchSchemaExposesLimitBounds(t *testing.T) {
+func TestSearchSchemasExposeLimitBounds(t *testing.T) {
 	doc, ok := cliHelpDocumentWithProfile("search", "").(map[string]any)
 	if !ok {
 		t.Fatalf("search doc type = %T", cliHelpDocumentWithProfile("search", ""))
@@ -401,6 +435,46 @@ func TestSearchSchemaExposesLimitBounds(t *testing.T) {
 	maxText, _ := props["max_text_chars"].(map[string]any)
 	if maxText["minimum"] != int64(1) || maxText["maximum"] != int64(2000) {
 		t.Fatalf("max_text_chars schema = %#v", maxText)
+	}
+
+	doc, ok = cliHelpDocumentWithProfile("search-context", "").(map[string]any)
+	if !ok {
+		t.Fatalf("search-context doc type = %T", cliHelpDocumentWithProfile("search-context", ""))
+	}
+	tool, ok = doc["tool"].(toolDef)
+	if !ok {
+		t.Fatalf("search-context tool = %#v", doc["tool"])
+	}
+	props = toolInputProperties(tool)
+	maxText, _ = props["max_text_chars"].(map[string]any)
+	if maxText["minimum"] != int64(1) || maxText["maximum"] != int64(2000) {
+		t.Fatalf("search-context max_text_chars schema = %#v", maxText)
+	}
+	if _, ok := props["include_text"]; !ok {
+		t.Fatalf("search-context schema missing include_text: %#v", props)
+	}
+	if _, ok := props["snippet_only"]; !ok {
+		t.Fatalf("search-context schema missing snippet_only: %#v", props)
+	}
+}
+
+func TestTailSchemaExposesLimitBounds(t *testing.T) {
+	doc, ok := cliHelpDocumentWithProfile("tail", "").(map[string]any)
+	if !ok {
+		t.Fatalf("tail doc type = %T", cliHelpDocumentWithProfile("tail", ""))
+	}
+	tool, ok := doc["tool"].(toolDef)
+	if !ok {
+		t.Fatalf("tail tool = %#v", doc["tool"])
+	}
+	props := toolInputProperties(tool)
+	limit, _ := props["limit"].(map[string]any)
+	if limit["minimum"] != int64(1) || limit["maximum"] != int64(1000) {
+		t.Fatalf("tail limit schema = %#v", limit)
+	}
+	scanLimit, _ := props["scan_limit"].(map[string]any)
+	if scanLimit["minimum"] != int64(1) || scanLimit["maximum"] != int64(5000) {
+		t.Fatalf("tail scan_limit schema = %#v", scanLimit)
 	}
 }
 

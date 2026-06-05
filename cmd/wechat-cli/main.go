@@ -730,7 +730,7 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePag
 		"keyword":        getStr(args, "keyword"),
 		"type":           firstNonEmpty(getStr(args, "kind_name"), getStr(args, "type")),
 		"sender":         getStr(args, "sender"),
-		"from_me":        getBoolDefault(args, "from_me", false),
+		"from_me":        queryFromMeArg(args),
 		"returned":       returned,
 	})
 	if meta["order"] == "" {

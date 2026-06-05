@@ -57,6 +57,10 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 				if err != nil {
 					hit["context_error"] = err.Error()
 				} else {
+					if ctxMap := mapStringAny(ctx); len(ctxMap) > 0 {
+						applyAgentTextOutputOptions(mapSliceAny(ctxMap["messages"]), a)
+						ctx = ctxMap
+					}
 					hit["context"] = ctx
 					contextsReturned++
 				}
@@ -69,7 +73,7 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 			"keyword":           getStr(a, "keyword"),
 			"chat":              firstNonEmpty(getStr(a, "chat"), getStr(a, "talker")),
 			"sender":            getStr(a, "sender"),
-			"from_me":           getBoolDefault(a, "from_me", false),
+			"from_me":           queryFromMeArg(a),
 			"type":              firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")),
 			"after":             getStr(a, "after"),
 			"before":            getStr(a, "before"),

@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.6.15",
+  [string]$Version = "1.6.16",
   [string]$WcdbLib = $env:WECHAT_CLI_WCDB_LIB
 )
 
