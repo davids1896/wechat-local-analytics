@@ -25,7 +25,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 wechat-cli sessions --limit 5 --pretty
 ```
 
-第三行是安装成功测试：如果返回 `ok: true` 并看到最近会话，说明 CLI、key、数据库读取都通了。默认安装的是 CLI，不注册 MCP，不装后台 watcher。安装完成后命令会放到用户 PATH 上：
+第三行是安装成功测试：如果返回 `ok: true` 并看到最近会话，说明 CLI、key、数据库读取都通了。默认安装的是 CLI，不注册外部协议适配器，不装后台 watcher。安装完成后命令会放到用户 PATH 上：
 
 - macOS: `~/.local/bin/wechat-cli`
 - Windows: `%LOCALAPPDATA%\Microsoft\WindowsApps\wechat-cli.cmd`，如该目录不存在则使用 `%USERPROFILE%\.local\bin\wechat-cli.cmd`
@@ -59,54 +59,108 @@ wechat-cli sessions
 ## 快速开始
 
 ```bash
+wechat-cli agent --pretty
+wechat-cli status --pretty
 wechat-cli sessions
-wechat-cli resolve-chat "张三"
-wechat-cli timeline "某个群" --limit 20
-wechat-cli history "张三" --view agent --limit 50
-wechat-cli search "关键词" --in "某个群"
-wechat-cli media "某个群" --type image --limit 10
+wechat-cli resolve-chat "$CHAT"
+wechat-cli timeline "$CHAT" --limit 20
+wechat-cli context "$CHAT" --local-id 123 --before-count 20 --after-count 20
+wechat-cli tail "$CHAT" --since-local-id 123 --jsonl
+wechat-cli search-context "$KEYWORD" --in "$CHAT" --context-limit 3
+wechat-cli history "$CHAT" --view agent --limit 50
+wechat-cli search "$KEYWORD" --in "$CHAT"
+wechat-cli media "$CHAT" --type image --limit 10
 ```
 
 所有命令面向 agent，stdout 默认输出紧凑 JSON；成功统一返回
 `{"ok":true,"tool":"...","command":"...","data":...}`，失败返回
 `{"ok":false,"error":...}`。`--json` 可传但只是兼容 no-op，人工查看时用
-`--pretty`。常用命令是薄封装，完整能力都可以通过通用调用访问：
+`--pretty`。例外是 `tail/watch --jsonl` 或 `--follow`：它们输出 newline-delimited event JSON，适合长驻小助手循环。常用命令是薄封装，完整能力都可以通过通用调用访问：
 
 ```bash
-wechat-cli timeline "某个群" --limit 20 --pretty
+wechat-cli timeline "$CHAT" --limit 20 --pretty
 wechat-cli timeline --help
 wechat-cli tool-schema chat_timeline
 wechat-cli tools
-wechat-cli call chat_timeline --chat "某个群" --limit 20
-wechat-cli call-json messages '{"chat":"张三","limit":50,"view":"agent"}'
-printf '{"keyword":"会议","limit":20}' | wechat-cli call-json search
+wechat-cli tools --profile all
+wechat-cli call chat_timeline --chat "$CHAT" --limit 20
+wechat-cli call-json messages '{"chat":"$CHAT","limit":50,"view":"agent"}'
+printf '{"keyword":"$KEYWORD","limit":20}' | wechat-cli call-json search
 ```
 
 `timeline --help` / `tool-schema <command-or-tool>` 也返回同一个成功 envelope，
-`data.agent` 里包含 agent 示例、分页策略和常见恢复动作。默认 `images[]` 只暴露
+`data.agent` 里包含 agent 示例、分页策略和常见恢复动作。默认 schema 是 assistant
+瘦身版，只显示 canonical 参数；历史 alias/raw/debug 字段用
+`wechat-cli tool-schema timeline --profile all` 或 `wechat-cli tools --profile all`
+查看。默认 `images[]` 只暴露
 一个最佳可读本地路径：有原图/高清图就返回原图/高清图，只有拿不到时才回落到缩略图。
 `export` 默认 `view=agent`，JSONL 每行与 timeline message 行同形；需要底层字段时传
 `--view raw`。合并转发里的图片会尽量解析到 `forward_chat.items[].images[].path`；
 只有拿不到来源资源或本地文件不可读时才保留 `forward_image_not_resolved`。
 
-`freshness` 是返回数据的新鲜度/诊断信息：例如是否触发过 metadata 自动刷新、分页是否还有下一页、结果是否可能受缺 key 或 cache 滞后影响。
+严格只读任务可加全局开关：
+
+```bash
+wechat-cli --strict-read-only timeline "$CHAT" --limit 20
+WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
+```
+
+strict 模式只读已有数据库/已有文件；不会自动刷新 metadata/key，不生成媒体解码 cache
+或语音转写 cache，也会拒绝 `cache refresh/rebuild` 和 `export` 这类本地写命令。
+
+`freshness` 是返回数据的新鲜度/诊断信息：例如是否触发过 metadata 自动刷新、分页是否还有下一页、结果是否可能受缺 key 或 cache 滞后影响。`status` / `agent` 会直接给出 `readiness=ready|degraded|blocked`；如果 metadata cache 可用但已滞后，会返回 `warnings=["metadata_cache_degraded"]` 和具体 stale reason。
+
+`agent` 是 agent 进入微信读取环境的总入口。它返回当前能力矩阵、推荐工作流、质量验收命令和本机 readiness，不会读取大量聊天正文，也不会修改微信数据；`read-os` 仍是兼容别名：
+
+```bash
+wechat-cli agent --pretty
+wechat-cli status --pretty
+wechat-cli coverage --pretty
+wechat-cli workflows --pretty
+```
+
+搜索或 timeline 拿到某条消息后，用 `context` 自然展开上下文：
+
+```bash
+wechat-cli search "$KEYWORD" --in "$CHAT" --limit 5 --pretty
+wechat-cli context "$CHAT" --local-id 123 --before-count 20 --after-count 20 --pretty
+wechat-cli search-context "$KEYWORD" --in "$CHAT" --context-limit 3 --pretty
+wechat-cli timeline "$CHAT" --before-message 123 --limit 20 --pretty
+```
+
+`context` 返回的 `messages[]` 与 `timeline` 同形，额外带 `context_role=before/anchor/after`，用于让 agent 从一句话继续向前向后读。`search-context` 是 `search -> context` 的组合入口；`timeline --before-message/--after-message` 则把 `local_id` 当游标翻更旧或更新的消息。
+
+小助手增量观察用 `tail` / `watch`。它仍然是 read-only：不发消息、不控制 UI。传 chat 时返回 message events，`event.message` 与 timeline message 行同形；不传 chat 时返回 session/unread events。普通模式返回标准 envelope；`--jsonl`/`--follow` 输出一行一个 event，不包 envelope。`cursor` 可原样传回下一次调用：
+
+```bash
+wechat-cli tail "$CHAT" --since-local-id 123
+wechat-cli tail "$CHAT" --since-local-id 123 --jsonl
+wechat-cli watch --mode sessions --cursor session:1780560000 --jsonl
+wechat-cli watch "$CHAT" --cursor local_id:123 --jsonl --follow
+```
 
 ## 常用命令
 
 | 命令 | 用途 |
 | --- | --- |
+| `tools` | 默认列 assistant 高信噪比工具；`--profile all` 列全部兼容/维护工具 |
+| `agent` | WeChat Read OS 总入口：覆盖率矩阵、工作流、质量验收、本机状态 |
+| `status` / `coverage` / `workflows` | 更短的状态、覆盖率、工作流入口 |
 | `update` | 更新到 GitHub latest release |
 | `sessions` | 最近会话、未读数、最后消息摘要 |
 | `resolve-chat` | 把昵称、备注、群名解析成稳定 talker |
 | `timeline` | 普通读聊天的首选入口，返回 `query` / `freshness` / `messages` |
+| `context` | 以 `local_id` / `server_id` 为锚点展开前后消息 |
+| `tail` / `watch` | read-only 增量事件观察，message events 复用 timeline 行 |
 | `history` | 更底层的消息读取，支持时间、类型、sender、分页等过滤 |
 | `search` | 走微信本地 FTS 的跨会话全文搜索 |
+| `search-context` | 搜索并自动展开每个命中附近上下文 |
 | `media` | 按消息定位图片、视频、文件等本机可读资源 |
 | `members` | 群成员、群名片、好友关系 |
 | `sns-feed` / `sns-search` / `sns-notifications` | 朋友圈时间线、搜索、点赞评论通知 |
 | `transfers` / `red-packets` | 转账和红包记录 |
 | `favorites` | 微信收藏 |
-| `export` | 单个会话导出到 jsonl / markdown / html |
+| `export` | 显式本地文件写入：单个会话导出到 jsonl / markdown / html |
 | `schema` / `sql` | 只读数据库结构和 SQL 诊断 |
 | `cache status` / `cache refresh` | metadata cache 诊断与刷新 |
 
@@ -116,7 +170,7 @@ printf '{"keyword":"会议","limit":20}' | wechat-cli call-json search
 {
   "id": {"local_id": 123, "server_id_str": "9876543210", "talker": "xxx@chatroom"},
   "time_iso": "2026-05-26T13:00:00+08:00",
-  "sender": "张三",
+  "sender": "Alice",
   "sender_wxid": "wxid_xxx",
   "is_from_me": false,
   "kind": "image",
@@ -127,21 +181,6 @@ printf '{"keyword":"会议","limit":20}' | wechat-cli call-json search
 ```
 
 默认输出只给 agent 可用的信息：可读图片/视频/文件路径、链接、引用、转账红包、位置、语音转写等。raw XML、CDN/aeskey、不可读 `.dat`、候选路径和解码细节默认隐藏；维护者需要时再传 `include_debug=true` 或 `fields=full`。
-
-## MCP 兼容
-
-默认形态是 CLI。MCP 只保留为兼容入口：
-
-```bash
-wechat-cli serve-mcp
-```
-
-安装时需要 MCP 注册才加参数：
-
-```bash
-./install.sh --all --yes --mcp
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
-```
 
 ## 数据与隐私
 
@@ -157,7 +196,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
 | 现象 | 处理 |
 | --- | --- |
 | 找不到会话 | 先用 `wechat-cli resolve-chat "名字"` 看候选，必要时在微信里打开对应聊天后重试 |
-| 提示缺 key | 确认微信已登录并打开过聊天；macOS agent 可跑 `wxkey doctor` / `wxkey setup` |
+| 提示缺 key | 确认微信已登录并打开过聊天；macOS agent 可跑 `~/.local/share/wechat-cli/wxkey bootstrap` / `~/.local/share/wechat-cli/wxkey doctor` |
 | `wxkey bootstrap` 先显示 `found=0` 或 `initial passive scan did not capture DB keys before its deadline`，随后进入 PBKDF fallback | WeChat 4.1.10+ 的正常 fallback 路径；不要在 fallback 运行中中断。最终出现 `[OK] key config written` 且 `wechat-cli sessions --limit 5 --pretty` 返回 `ok: true` 就算成功 |
 | `PBKDF fallback got partial key coverage (24/26)` | 不是安装失败；表示已拿到大部分 DB key，核心聊天通常可读。先用 `sessions` 验证；如果后续某些页面/媒体缺 key，打开对应微信页面后重跑 `wxkey bootstrap` 或 `wxkey doctor` |
 | `PBKDF fallback found no keys` | 先确认已更新到最新 wechat-cli；新版会在 PBKDF fallback 前停掉已有 WeChat，避免 LLDB 调试 shadow 而原 WeChat 仍占着登录态/DB。若更新后仍看到 `pbkdf_calls=0`，表示 LLDB 拉起的微信没有触发 DB 解密，保持该微信窗口登录并打开一个普通聊天后重跑；`pbkdf_calls>0` 但 `matching_db_salt_calls=0` 通常是 DB root/账号目录不匹配，改用正确的 `--root .../xwechat_files/<wxid>` 或 `WECHAT_CLI_DB_ROOT`；有匹配 salt 但仍没 key，可能是当前微信构建的派生逻辑变化，反馈诊断日志 |
@@ -175,6 +214,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -All -Yes -Mcp
 go test ./...
 go build -trimpath -o wechat-cli ./cmd/wechat-cli
 ```
+
+真实微信读取验收可用：
+
+```bash
+WECHAT_CLI_BIN=./wechat-cli WECHAT_READ_TEST_CHAT="$CHAT" WECHAT_READ_TEST_KEYWORD="$KEYWORD" ./scripts/wechat-read-regression.sh
+```
+
+它会依次验证 `agent/status/coverage/workflows -> resolve-chat -> sessions -> timeline -> context -> timeline anchor paging -> tail -> search -> search-context -> manual search context -> media -> members -> export`，并把每一步 JSON 保存到 `0700` 临时目录。该目录包含本地聊天数据，不要上传或分享。
 
 macOS release 包：
 

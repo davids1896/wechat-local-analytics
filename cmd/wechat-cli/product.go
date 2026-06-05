@@ -33,6 +33,13 @@ func envBoolAny(names ...string) bool {
 	return false
 }
 
+func strictReadOnlyMode() bool {
+	if strings.TrimSpace(os.Getenv("WECHAT_CLI_STRICT_READ_ONLY")) != "" {
+		return envBool("WECHAT_CLI_STRICT_READ_ONLY")
+	}
+	return envBool("WX_MCP_STRICT_READ_ONLY")
+}
+
 func appStateDir() (string, error) {
 	if p := envFirst("WECHAT_CLI_STATE_DIR", "WX_MCP_STATE_DIR"); p != "" {
 		return filepath.Clean(p), nil

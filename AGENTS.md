@@ -7,13 +7,13 @@ macOS or Windows.
 
 `wechat-cli` is a WeChat/微信 local chat history CLI for macOS and Windows
 agents. Use it for local WeChat messages, contacts, groups, media, Moments,
-favorites, transfers, red packets, unread chats, full-text search, or explicit
-MCP compatibility from the user's own machine.
+favorites, transfers, red packets, unread chats, and full-text search from the
+user's own machine.
 
 Do not classify it as a screen-control WeChat bot, Accessibility automation,
 WeChat Official Account publisher, Mini Program devtools bridge, WeChat Work /
-WeCom bot, or reply bot. It is a local-data CLI for WeChat 4.x. The MCP stdio
-adapter exists only as explicit compatibility via `wechat-cli serve-mcp`.
+WeCom bot, reply bot, or external protocol server. It is a local-data CLI for
+WeChat 4.x.
 
 ## Fast Install
 
@@ -38,10 +38,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"
 ```
 
-Default install is CLI-only. It does not register MCP and does not install a
-watcher. If the user explicitly needs MCP compatibility, install with `--mcp`
-on macOS or `-Mcp` on Windows; the registered command must run
-`wechat-cli serve-mcp`.
+Default install is CLI-only. It does not register external agent protocols and
+does not install a watcher.
 
 Release assets:
 
@@ -52,9 +50,9 @@ Release assets:
 
 Release zip contents:
 
-- macOS: `wechat-cli`, `wxkey`, `libWCDB.dylib`, `install.sh`, docs, manifest,
-  and `scripts/install-release.sh`
-- Windows: `wechat-cli.exe`, `libWCDB.dll`, `install.ps1`, docs, manifest, and
+- macOS: `wechat-cli`, `wxkey`, `libWCDB.dylib`, `install.sh`, docs, and
+  `scripts/install-release.sh`
+- Windows: `wechat-cli.exe`, `libWCDB.dll`, `install.ps1`, docs, and
   `scripts/install-release.ps1`
 
 ## Runtime Facts
@@ -151,8 +149,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Update -Yes -
 ```
 
 For an existing git checkout, the same update command runs `git pull --ff-only`
-when possible and reinstalls binaries. It does not rerun bootstrap, refresh,
-MCP registration, or watcher setup unless flags are explicitly added.
+when possible and reinstalls binaries. It does not rerun bootstrap, refresh, or
+watcher setup unless flags are explicitly added.
 
 Verify after install:
 
@@ -178,9 +176,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ClearState -D
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -PurgeState -DryRun -Json
 ```
 
-`--uninstall` removes installed files, watcher plist, and both `wechat-cli` and
-legacy `wx-mcp` MCP registrations by default, while preserving key/state unless
-`--purge-state` is passed. `--clear-state` removes user state:
+`--uninstall` removes installed files and watcher plist while preserving
+key/state unless `--purge-state` is passed. `--clear-state` removes user state:
 `~/.config/wxcli/config.json`, `~/.wechat-cli`, legacy `~/.wx-mcp`, logs, the
 stored wxkey sudo credential, and any watcher that would recreate state.
 
@@ -200,9 +197,21 @@ does not install a launchd watcher by default for the same reason.
 
 ## Agent Defaults
 
-- Prefer CLI commands over MCP tools for production agent workflows.
-- Use `wechat-cli --help`, `wechat-cli tools`, `wechat-cli call <tool> --key value`,
-  and `wechat-cli call-json <tool> '{...}'` as the stable interface.
+- Use `wechat-cli --help`, `wechat-cli tools`, `wechat-cli tools --profile all`,
+  `wechat-cli call <tool> --key value`, and `wechat-cli call-json <tool> '{...}'`
+  as the stable interface. `tools` defaults to the high-signal assistant
+  profile with slim canonical schemas; `--profile all` includes compatibility
+  aliases, maintenance, and debug tools. `tool-schema <command>` is slim by
+  default; use `tool-schema <command> --profile all` only when debugging
+  compatibility fields.
+- For strict local read-only work, run commands with
+  `WECHAT_CLI_STRICT_READ_ONLY=1` or global `--strict-read-only`. This disables
+  auto metadata/key refresh, media decode cache writes, voice transcript cache
+  writes, `cache refresh/rebuild`, and `export`.
+- Start a WeChat reading task with `wechat-cli agent --pretty` when you need
+  the capability matrix, workflows, quality gates, and local readiness status.
+  Use `wechat-cli status`, `wechat-cli coverage`, and `wechat-cli workflows`
+  when only one slice is needed.
 - Do not ask the user to run diagnostics manually. The agent runs CLI
   diagnostics and setup retries; the user only performs OS or WeChat GUI actions
   an agent cannot do.
@@ -214,10 +223,24 @@ does not install a launchd watcher by default for the same reason.
   reads live messages, defaults to `order=desc` plus `display_order=asc`, and
   returns `query` / `freshness` / `messages`. Use `query.has_more` and
   `query.next_offset` to page through a whole chat.
+- Use `tail` / `watch` for read-only incremental observation. With `chat` it
+  returns message events whose `event.message` has the same shape as timeline
+  rows; without `chat`, `--mode sessions` returns session/unread events. Reuse
+  the returned `cursor` on the next call. Normal mode returns the standard
+  envelope. CLI `--jsonl` and `--follow` emit newline-delimited event objects
+  without the envelope; they still do not send messages or control the WeChat UI.
+- Use `context` after `search` or `timeline` when you have a message
+  `local_id`/`server_id` and need surrounding conversation. It returns the same
+  agent message shape as timeline plus `context_role=before/anchor/after`.
+- Use `search-context` when the user asks what happened around a keyword hit;
+  it combines live FTS search with context windows. Use
+  `timeline --before-message <local_id>` or `--after-message <local_id>` when a
+  message id should become the paging cursor.
 - Use `history --view agent` only when lower-level filters or ordering are
   needed. Do not use `fields=full` for normal user-facing chat reading.
-- Use `export` for large single-chat file outputs instead of asking the model to
-  hold all rows in context.
+- Use `export` only when an explicit local file output is appropriate for large
+  single-chat reads; it is a local file write, not part of the default assistant
+  read-only tool shortlist.
 
 Agent-ready message rows include:
 
@@ -226,6 +249,9 @@ Agent-ready message rows include:
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
 `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and
 concise `warnings`.
+`media` remains path/resource-first, but includes `id`, `time`, `time_iso`,
+`sender`, and `kind` so agents can correlate media paths back to timeline rows
+without asking the CLI to interpret image contents.
 
 Default output follows the WeChat UI principle: if a human sees information in
 WeChat and it affects understanding, return it by default. Implementation
@@ -250,7 +276,7 @@ config, and retries decoding. It does not perform visual recognition.
   run `./wxkey doctor` if needed. Do not suggest disabling SIP.
 - If macOS key setup returns partial key coverage, run `./wxkey doctor`, identify
   missing DB paths, ask the user to open only the corresponding chats/pages in
-  WeChat, wait briefly, then rerun `./wxkey setup`.
+  WeChat, wait briefly, then rerun `./wxkey bootstrap`.
 - If Windows key setup fails, inspect installer `blocked_by` / `next_action`,
   confirm WeChat/Weixin is logged in, confirm `WECHAT_CLI_DB_ROOT` points to the
   account directory that directly contains `db_storage`, and rerun
@@ -259,3 +285,9 @@ config, and retries decoding. It does not perform visual recognition.
   `username` through `--talker` or `--chat`.
 - Treat `freshness`, `warnings`, `errors[]`, `parse_error`, and missing
   enrichment fields as actionable diagnostics, not prose.
+- For release validation against a real logged-in WeChat, run
+  `scripts/wechat-read-regression.sh` with `WECHAT_READ_TEST_CHAT` and
+  `WECHAT_READ_TEST_KEYWORD`. It exercises `agent/status/coverage/workflows`,
+  `resolve-chat`, `sessions`, `timeline`, `context`, timeline anchor paging,
+  `tail`, `search-context`, manual search context, `media`, `members`, and
+  `export`.

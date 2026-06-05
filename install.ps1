@@ -10,9 +10,6 @@ param(
   [switch]$Refresh,
   [switch]$BackgroundRefresh,
   [switch]$Doctor,
-  [switch]$Mcp,
-  [switch]$NoMcp,
-  [string]$McpClient = "none",
   [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
   [string]$BinDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_BIN_DIR)) { $env:WECHAT_CLI_BIN_DIR } else { $env:WX_MCP_BIN_DIR })
 )
@@ -21,8 +18,6 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "wechat-cli"
 $LegacyAppName = "wx-mcp"
-$McpName = "wechat-cli"
-$LegacyMcpName = "wx-mcp"
 $SourceDir = $PSScriptRoot
 $local = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($local)) {
@@ -47,7 +42,6 @@ $actions = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
 $errors = New-Object System.Collections.Generic.List[string]
 $checks = New-Object System.Collections.Generic.List[string]
-$registered = New-Object System.Collections.Generic.List[string]
 $mode = "install"
 $status = "ok"
 $blockedBy = ""
@@ -56,8 +50,6 @@ $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
 $refreshRan = $false
 $purgeState = [bool]($PurgeState -or $ClearState)
-$registerMcp = $false
-$mcpOptionSeen = [bool]($Mcp -or $NoMcp -or $PSBoundParameters.ContainsKey("McpClient"))
 
 function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
@@ -82,11 +74,6 @@ function Write-HumanResult($Out) {
   }
   if (-not [string]::IsNullOrWhiteSpace($Out.next_action)) {
     Write-Host "  next: $($Out.next_action)"
-  }
-  if ($Out.mcp_registered_clients.Count -gt 0) {
-    Write-Host "  mcp_registered: $($Out.mcp_registered_clients -join ', ')"
-  } elseif ($script:registerMcp -and $McpClient -ne "none") {
-    Write-Host "  mcp_registered: no supported client command found"
   }
   if ($Out.refresh_ran) {
     Write-Host "  metadata_cache: complete"
@@ -123,9 +110,6 @@ function Finish {
     log = $log
     dry_run = [bool]$DryRun
     purge_state = [bool]$script:purgeState
-    mcp_client = $McpClient
-    mcp_registered = ($registered.Count -gt 0)
-    mcp_registered_clients = @($registered)
     refresh_ran = [bool]$script:refreshRan
     actions = @($actions)
     warnings = @($warnings)
@@ -197,7 +181,6 @@ function Copy-InstallDocs {
     "install.ps1",
     "README.md",
     "AGENTS.md",
-    "mcp-server.json",
     "LICENSE",
     "SECURITY.md",
     "THIRD_PARTY_NOTICES.md"
@@ -214,73 +197,6 @@ function Copy-InstallDocs {
     Copy-Item -LiteralPath $guide -Destination (Join-Path $InstallDir "docs\WINDOWS_USER_GUIDE.md") -Force
   }
   Add-Action "copy installer docs and manifest"
-}
-
-function Register-Mcp {
-  if (-not $script:registerMcp -or $NoMcp -or $McpClient -eq "none") { return }
-  $exe = Join-Path $InstallDir "$AppName.exe"
-  $found = $false
-  if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
-    Add-Action "register Codex MCP server $McpName at $exe serve-mcp"
-    if ($DryRun) {
-      $found = $true
-    } else {
-    try {
-      & codex mcp remove $McpName *> $null
-      & codex mcp remove $LegacyMcpName *> $null
-      & codex mcp add $McpName -- $exe serve-mcp *> $null
-      $registered.Add("codex") | Out-Null
-      $found = $true
-    } catch {
-      Add-Warning "Codex MCP registration failed: $($_.Exception.Message)"
-    }
-    }
-  }
-  if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
-    Add-Action "register Claude MCP server $McpName at $exe serve-mcp"
-    if ($DryRun) {
-      $found = $true
-    } else {
-    try {
-      & claude mcp remove -s user $McpName *> $null
-      & claude mcp remove -s user $LegacyMcpName *> $null
-      & claude mcp add -s user $McpName $exe serve-mcp *> $null
-      $registered.Add("claude") | Out-Null
-      $found = $true
-    } catch {
-      Add-Warning "Claude MCP registration failed: $($_.Exception.Message)"
-    }
-    }
-  }
-  if (-not $found -and $McpClient -eq "auto") {
-    Add-Warning "no supported MCP client command found; skipped registration"
-  }
-}
-
-function Remove-McpEntries {
-  if ($NoMcp -or $McpClient -eq "none") { return }
-  if (($McpClient -eq "auto" -or $McpClient -eq "codex") -and (Have-Command "codex")) {
-    Add-Action "remove Codex MCP server $McpName and legacy $LegacyMcpName"
-    if (-not $DryRun) {
-      try {
-        & codex mcp remove $McpName *> $null
-        & codex mcp remove $LegacyMcpName *> $null
-      } catch {
-        Add-Warning "Codex MCP removal failed: $($_.Exception.Message)"
-      }
-    }
-  }
-  if (($McpClient -eq "auto" -or $McpClient -eq "claude") -and (Have-Command "claude")) {
-    Add-Action "remove Claude MCP server $McpName and legacy $LegacyMcpName"
-    if (-not $DryRun) {
-      try {
-        & claude mcp remove -s user $McpName *> $null
-        & claude mcp remove -s user $LegacyMcpName *> $null
-      } catch {
-        Add-Warning "Claude MCP removal failed: $($_.Exception.Message)"
-      }
-    }
-  }
 }
 
 function Resolve-Components {
@@ -503,7 +419,6 @@ function Uninstall-WxMcp {
   Add-Action "remove legacy CLI command shim $LegacyShimPath if managed by wechat-cli"
   Add-Action "remove install directory $InstallDir"
   Add-Action "remove legacy install directory $LegacyInstallDir"
-  Remove-McpEntries
   if ($script:purgeState) {
     Add-PurgeStateActions
   }
@@ -549,24 +464,6 @@ try {
   elseif ($Uninstall) { $mode = "uninstall" }
   elseif ($Update) { $mode = "update" }
 
-  if ($Mcp) {
-    $registerMcp = $true
-    if ($McpClient -eq "none") { $McpClient = "auto" }
-  } elseif ($McpClient -ne "none") {
-    $registerMcp = $true
-  }
-  if ($NoMcp) {
-    $registerMcp = $false
-    $McpClient = "none"
-  }
-  if ($Uninstall -and -not $mcpOptionSeen) {
-    $registerMcp = $true
-    $McpClient = "auto"
-  }
-  if ($McpClient -notin @("auto", "claude", "codex", "none")) {
-    throw "-McpClient must be auto, claude, codex, or none"
-  }
-
   if ($PurgeState -and -not ($Uninstall -or $ClearState)) {
     throw "-PurgeState is only valid with -Uninstall; use -ClearState to remove state without uninstalling"
   }
@@ -595,7 +492,6 @@ try {
   Install-Components
   Install-CliShim
   Clear-LegacyMessageCache
-  Register-Mcp
   Run-CacheRefresh
   if ($DryRun) {
     $status = "dry_run"

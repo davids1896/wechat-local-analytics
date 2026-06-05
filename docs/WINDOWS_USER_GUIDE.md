@@ -27,7 +27,6 @@ wechat-cli\
   wechat-cli.exe
   libWCDB.dll
   install.ps1
-  mcp-server.json
   AGENTS.md
   README.md
   LICENSE
@@ -202,9 +201,6 @@ D:\wechat-cli\wechat-cli.exe media "contact or group name" --type image --limit 
 D:\wechat-cli\wechat-cli.exe stats "contact or group name"
 ```
 
-If an MCP client is explicitly required, register the optional compatibility
-adapter with `-Mcp`; the adapter runs `wechat-cli.exe serve-mcp`.
-
 ## Troubleshooting
 
 ### PowerShell says scripts are disabled
@@ -252,8 +248,8 @@ Put `libWCDB.dll` beside `wechat-cli.exe`, or set:
 
 ### Installed exe is in use during update
 
-Close terminals, agents, or optional MCP clients that are still using
-`wechat-cli.exe`, or stop old processes:
+Close terminals or agents that are still using `wechat-cli.exe`, or stop old
+processes:
 
 ```powershell
 Get-Process wechat-cli -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -271,7 +267,7 @@ Then rerun the installer.
 
 ## Reset / Uninstall
 
-Use the installer so optional MCP client registrations are removed as well as files.
+Use the installer so installed files and state are removed consistently.
 
 Clear keys/cache/logs but keep the installed binaries:
 
@@ -279,7 +275,7 @@ Clear keys/cache/logs but keep the installed binaries:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ClearState -Yes -Json
 ```
 
-Uninstall binaries and optional MCP registration while keeping keys/cache:
+Uninstall binaries while keeping keys/cache:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Yes -Json

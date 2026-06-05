@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,7 +130,7 @@ func TestSenderPrefixRe(t *testing.T) {
 	}
 }
 
-func TestCLIHelpIsDefaultAndMCPIsExplicit(t *testing.T) {
+func TestCLIHelpIsDefault(t *testing.T) {
 	if !maybeRunCLI(nil) {
 		t.Fatal("empty args should be handled by CLI help")
 	}
@@ -158,6 +159,30 @@ func TestParseGlobalCLIOptionsCompactWins(t *testing.T) {
 	}
 	if opts.Pretty {
 		t.Fatalf("Pretty = true, want false")
+	}
+	if len(args) != 1 || args[0] != "sessions" {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestParseGlobalCLIOptionsStrictReadOnly(t *testing.T) {
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "")
+	opts, args, err := parseGlobalCLIOptions([]string{"--strict-read-only", "timeline", "张三"})
+	if err != nil {
+		t.Fatalf("parseGlobalCLIOptions error: %v", err)
+	}
+	if !opts.StrictReadOnly || !strictReadOnlyMode() {
+		t.Fatalf("strict read-only not enabled: opts=%#v env=%q", opts, os.Getenv("WECHAT_CLI_STRICT_READ_ONLY"))
+	}
+	if strings.Join(args, "\x00") != strings.Join([]string{"timeline", "张三"}, "\x00") {
+		t.Fatalf("args = %#v", args)
+	}
+	opts, args, err = parseGlobalCLIOptions([]string{"--strict-read-only=false", "sessions"})
+	if err != nil {
+		t.Fatalf("parseGlobalCLIOptions disable error: %v", err)
+	}
+	if opts.StrictReadOnly || strictReadOnlyMode() {
+		t.Fatalf("strict read-only should be disabled: opts=%#v env=%q", opts, os.Getenv("WECHAT_CLI_STRICT_READ_ONLY"))
 	}
 	if len(args) != 1 || args[0] != "sessions" {
 		t.Fatalf("args = %#v", args)
@@ -209,6 +234,49 @@ func TestToolSchemaEnvelopeIdentifiesCommand(t *testing.T) {
 	doc, ok := env.Data.(map[string]any)
 	if !ok || doc["agent"] == nil || doc["command"] == nil || doc["tool"] == nil {
 		t.Fatalf("tool-schema data = %#v", env.Data)
+	}
+}
+
+func TestToolSchemaDefaultsToSlimProfileAndKeepsFullProfile(t *testing.T) {
+	slimDoc, ok := cliHelpDocumentWithProfile("timeline", "").(map[string]any)
+	if !ok {
+		t.Fatalf("slim doc type = %T", cliHelpDocumentWithProfile("timeline", ""))
+	}
+	if slimDoc["schema_profile"] != "assistant" {
+		t.Fatalf("schema_profile = %#v, want assistant", slimDoc["schema_profile"])
+	}
+	slimTool, ok := slimDoc["tool"].(toolDef)
+	if !ok {
+		t.Fatalf("slim tool = %#v", slimDoc["tool"])
+	}
+	slimProps := toolInputProperties(slimTool)
+	for _, hidden := range []string{"before_message_local_id", "debug", "kind_name", "base_kind", "include_images"} {
+		if _, ok := slimProps[hidden]; ok {
+			t.Fatalf("slim schema still exposes %q: %#v", hidden, slimProps)
+		}
+	}
+	for _, kept := range []string{"chat", "limit", "before_message", "after_message", "include_debug"} {
+		if _, ok := slimProps[kept]; !ok {
+			t.Fatalf("slim schema removed canonical %q: %#v", kept, slimProps)
+		}
+	}
+
+	fullDoc, ok := cliHelpDocumentWithProfile("timeline", "all").(map[string]any)
+	if !ok {
+		t.Fatalf("full doc type = %T", cliHelpDocumentWithProfile("timeline", "all"))
+	}
+	if fullDoc["schema_profile"] != "all" {
+		t.Fatalf("schema_profile = %#v, want all", fullDoc["schema_profile"])
+	}
+	fullTool, ok := fullDoc["tool"].(toolDef)
+	if !ok {
+		t.Fatalf("full tool = %#v", fullDoc["tool"])
+	}
+	fullProps := toolInputProperties(fullTool)
+	for _, kept := range []string{"before_message_local_id", "debug", "kind_name", "base_kind", "include_images"} {
+		if _, ok := fullProps[kept]; !ok {
+			t.Fatalf("full schema missing %q: %#v", kept, fullProps)
+		}
 	}
 }
 
@@ -277,6 +345,20 @@ func TestCLIErrorCodeMapping(t *testing.T) {
 	}
 }
 
+func TestCLIErrorAdviceForKeywordAndUnknownCommand(t *testing.T) {
+	kw := cliErrorAdvice("tool_error", "keyword is required", "search", "search")
+	if kw.NextAction == "" || len(kw.SuggestedCommands) == 0 {
+		t.Fatalf("keyword advice missing: %#v", kw)
+	}
+	if !strings.Contains(strings.Join(kw.SuggestedCommands, "\n"), "search-context") {
+		t.Fatalf("keyword advice should suggest search-context: %#v", kw)
+	}
+	unknown := cliErrorAdvice("unknown_command", `unknown command "foo"`, "", "foo")
+	if unknown.NextAction == "" || !strings.Contains(strings.Join(unknown.SuggestedCommands, "\n"), "agent") {
+		t.Fatalf("unknown command advice = %#v", unknown)
+	}
+}
+
 func TestCLIToolCoverage(t *testing.T) {
 	missing := map[string]bool{}
 	for _, td := range toolDefs {
@@ -292,9 +374,6 @@ func TestCLIToolCoverage(t *testing.T) {
 
 func TestCLICommandSpecsHaveAgentExamples(t *testing.T) {
 	for _, spec := range cliCommandSpecs {
-		if spec.Command == "serve-mcp" {
-			continue
-		}
 		if len(spec.Examples) == 0 {
 			t.Fatalf("command %q has no agent examples", spec.Command)
 		}
@@ -305,6 +384,33 @@ func TestParseKVFlags(t *testing.T) {
 	got := parseKVFlags([]string{"--chat", "某群", "--limit=20", "--include-debug", "--server-id-str", "9223372036854775808"})
 	if got["chat"] != "某群" || got["limit"] != int64(20) || got["include_debug"] != true || got["server_id_str"] != "9223372036854775808" {
 		t.Fatalf("parseKVFlags = %#v", got)
+	}
+}
+
+func TestParseKVFlagsAgentBooleans(t *testing.T) {
+	got := parseKVFlags([]string{"--include-status", "--include-anchor=false"})
+	if got["include_status"] != true || got["include_anchor"] != false {
+		t.Fatalf("parseKVFlags booleans = %#v", got)
+	}
+}
+
+func TestContextAnchorRefFromArgs(t *testing.T) {
+	ref, err := contextAnchorRefFromArgs(map[string]any{"server_id_str": "9223372036854775807"})
+	if err != nil {
+		t.Fatalf("contextAnchorRefFromArgs returned error: %v", err)
+	}
+	if ref.ServerID != 9223372036854775807 || ref.Kind != "server_id_str" {
+		t.Fatalf("ref = %#v", ref)
+	}
+	if _, err := contextAnchorRefFromArgs(map[string]any{"local_id": int64(0)}); err == nil {
+		t.Fatal("contextAnchorRefFromArgs accepted local_id=0")
+	}
+}
+
+func TestContextCountArgCapsWindow(t *testing.T) {
+	got := contextCountArg(map[string]any{"before_count": int64(999)}, "before_count", "before_messages", 20)
+	if got != 500 {
+		t.Fatalf("contextCountArg = %d, want 500", got)
 	}
 }
 
@@ -673,6 +779,10 @@ func TestAgentMessagesWarnsOnRawImageFallback(t *testing.T) {
 
 func TestAgentReadyMediaResourcesExposeOnlyReadableImagePath(t *testing.T) {
 	items := []map[string]any{{
+		"id":                    map[string]any{"local_id": int64(7), "talker": "room@chatroom"},
+		"time_iso":              "2026-06-04T16:00:00+08:00",
+		"kind":                  "image",
+		"sender":                "V",
 		"kind_name":             "image",
 		"base_kind":             int64(3),
 		"message_origin_source": int64(1),
@@ -724,6 +834,9 @@ func TestAgentReadyMediaResourcesExposeOnlyReadableImagePath(t *testing.T) {
 	}
 	if resources[0]["path"] != "/tmp/decoded.png" {
 		t.Fatalf("resource summary = %#v, want readable path", resources[0])
+	}
+	if items[0]["id"] == nil || items[0]["time_iso"] != "2026-06-04T16:00:00+08:00" || items[0]["kind"] != "image" || items[0]["sender"] != "V" {
+		t.Fatalf("message reference fields were not preserved: %#v", items[0])
 	}
 	for _, key := range []string{"local_paths", "local_path_details", "resource_type_raw", "variant_code", "resource_id", "resource_family", "status", "direct_readable", "paths"} {
 		if _, ok := resources[0][key]; ok {
@@ -933,6 +1046,24 @@ func main() {
 	cached := srv.voiceTranscriptForAgent(wav)
 	if cached["status"] != "ok" || cached["text"] != "本地转写成功" {
 		t.Fatalf("cached transcript = %#v", cached)
+	}
+}
+
+func TestVoiceTranscriptStrictReadOnlyDoesNotWriteCache(t *testing.T) {
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
+	dir := t.TempDir()
+	wav := filepath.Join(dir, "voice.wav")
+	if err := os.WriteFile(wav, []byte("RIFF0000WAVEfmt "), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := strings.TrimSuffix(wav, filepath.Ext(wav)) + ".transcript.json"
+
+	got := (&server{}).voiceTranscriptForAgent(wav)
+	if got["status"] != "unavailable" || got["engine"] != "disabled" || got["reason"] != "strict_read_only" {
+		t.Fatalf("transcript = %#v", got)
+	}
+	if _, err := os.Stat(cachePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("strict read-only wrote transcript cache or unexpected stat error: %v", err)
 	}
 }
 
@@ -1623,9 +1754,25 @@ func TestChatTimelineEnvelopeIncludesQueryAndFreshness(t *testing.T) {
 	if query["chat"] != "AI Agent" || query["talker"] != "room@chatroom" || query["display_order"] != "asc" || query["returned"] != 2 || query["has_more"] != true || query["next_offset"] != 2 {
 		t.Fatalf("query meta = %#v", query)
 	}
+	cursor := query["cursor"].(map[string]any)
+	if cursor["oldest_local_id"] != int64(1) || cursor["newest_local_id"] != int64(2) || cursor["next_after_message"] != int64(2) {
+		t.Fatalf("cursor meta = %#v", cursor)
+	}
 	freshness := env["freshness"].(map[string]any)
 	if freshness["message_source"] != "live_message_db" || freshness["metadata_cache_role"] != "name_resolution_only" || freshness["last_message_time"] != time.Unix(200, 0).Format("2006-01-02 15:04:05") {
 		t.Fatalf("freshness meta = %#v", freshness)
+	}
+}
+
+func TestReadEventsCursorHelpers(t *testing.T) {
+	args := map[string]any{"cursor": "local_id:42"}
+	applyReadEventsCursor(args, "local_id:42")
+	if args["after_message"] != int64(42) {
+		t.Fatalf("after_message = %#v, want 42", args["after_message"])
+	}
+	events := []map[string]any{{"cursor": "local_id:1"}, {"cursor": "local_id:2"}}
+	if got := newestReadEventsCursor(events); got != "local_id:2" {
+		t.Fatalf("newestReadEventsCursor = %q", got)
 	}
 }
 
@@ -1869,6 +2016,25 @@ func TestStaleCacheIndexUsable(t *testing.T) {
 	}
 	if !cacheRefreshWouldLikelyRepeat("critical snapshot error: session/session.db") {
 		t.Fatalf("critical snapshot errors should not spawn repeated background refreshes")
+	}
+}
+
+func TestStrictReadOnlyRejectsLocalWriteTools(t *testing.T) {
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
+	srv := &server{}
+	for name, fn := range map[string]func() (any, error){
+		"cache_refresh": func() (any, error) { return srv.toolCacheRefresh(nil) },
+		"cache_rebuild": func() (any, error) { return srv.toolCacheRebuild(nil) },
+		"export_messages": func() (any, error) {
+			return srv.toolExportMessages(map[string]any{
+				"chat": "wxid_a",
+				"path": filepath.Join(t.TempDir(), "chat.jsonl"),
+			})
+		},
+	} {
+		if _, err := fn(); err == nil || !strings.Contains(err.Error(), "strict_read_only") {
+			t.Fatalf("%s error = %v, want strict_read_only", name, err)
+		}
 	}
 }
 
@@ -2159,6 +2325,21 @@ func TestDecodeLocalImageForAgentWritesDecodedPath(t *testing.T) {
 	}
 }
 
+func TestWriteDecodedMediaCacheStrictReadOnlyDoesNotCreateCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
+
+	srv := &server{cfg: &config.Config{Wxid: "wxid_test"}}
+	_, err := srv.writeDecodedMediaCache("sample.dat", tinyPNG(), "png")
+	if err == nil || !strings.Contains(err.Error(), "strict_read_only") {
+		t.Fatalf("writeDecodedMediaCache error = %v, want strict_read_only", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".wechat-cli")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("strict read-only created state dir or unexpected stat error: %v", err)
+	}
+}
+
 func TestDecodeLocalImageForAgentReportsMissingImageKey(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("WX_MCP_CONFIG", cfgPath)
@@ -2189,6 +2370,43 @@ func TestDecodeLocalImageForAgentReportsMissingImageKey(t *testing.T) {
 	}
 	if details[0]["decode_status"] != "needs_image_key" {
 		t.Fatalf("decode_status = %#v, want needs_image_key; detail=%#v", details[0]["decode_status"], details[0])
+	}
+}
+
+func TestDecodeLocalImageStrictReadOnlySkipsImageKeyRefresh(t *testing.T) {
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("WX_MCP_CONFIG", cfgPath)
+	root := t.TempDir()
+	key := []byte("abcdefghijklmnop")
+	img := filepath.Join(root, "sample.dat")
+	if err := os.WriteFile(img, testWechatV4ImageDAT(t, key, tinyPNG()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(&config.Config{DBRoot: root, Keys: map[string]string{"salt": "enc"}}); err != nil {
+		t.Fatal(err)
+	}
+	oldRunImageKey := runWxkeyImageKey
+	t.Cleanup(func() { runWxkeyImageKey = oldRunImageKey })
+	calls := 0
+	runWxkeyImageKey = func(rootArg string) (*wxkey.ImageKeyResult, string, error) {
+		calls++
+		return &wxkey.ImageKeyResult{Key: hex.EncodeToString(key)}, "", nil
+	}
+
+	srv := &server{cfg: &config.Config{DBRoot: root}}
+	res := map[string]any{}
+	srv.attachLocalPathAgentFields(res, "image", []string{img})
+
+	if calls != 0 {
+		t.Fatalf("image-key refresh calls = %d, want 0 in strict read-only", calls)
+	}
+	details, ok := res["local_path_details"].([]map[string]any)
+	if !ok || len(details) != 1 {
+		t.Fatalf("local_path_details = %#v, want one detail", res["local_path_details"])
+	}
+	if details[0]["image_key_refresh"] != "failed" || !strings.Contains(fmt.Sprint(details[0]["image_key_refresh_error"]), "strict_read_only") {
+		t.Fatalf("image-key refresh detail = %#v", details[0])
 	}
 }
 

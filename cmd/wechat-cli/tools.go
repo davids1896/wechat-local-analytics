@@ -21,46 +21,190 @@ func jsonSchema(properties props, required []string) any {
 func listedToolDefs() []toolDef {
 	out := make([]toolDef, len(toolDefs))
 	copy(out, toolDefs)
-	for i := range out {
-		out[i].Annotations = toolAnnotations(out[i].Name)
-	}
 	return out
 }
 
-func toolAnnotations(name string) map[string]any {
-	switch name {
-	case "cache_refresh":
-		return map[string]any{
-			"readOnlyHint":    false,
-			"destructiveHint": false,
-			"idempotentHint":  true,
-			"openWorldHint":   false,
+func listedToolDefsForProfile(profile string) ([]toolDef, bool) {
+	if profile == "" {
+		profile = "assistant"
+	}
+	if profile != "assistant" && profile != "maintenance" && profile != "all" {
+		return nil, false
+	}
+	if profile == "all" {
+		return listedToolDefs(), true
+	}
+	out := []toolDef{}
+	for _, td := range toolDefs {
+		if toolInProfile(td.Name, profile) {
+			out = append(out, displayToolDef(td))
 		}
-	case "cache_rebuild":
-		return map[string]any{
-			"readOnlyHint":    false,
-			"destructiveHint": true,
-			"idempotentHint":  true,
-			"openWorldHint":   false,
+	}
+	return out, true
+}
+
+func displayToolDef(td toolDef) toolDef {
+	out := toolDef{
+		Name:        td.Name,
+		Description: displayToolDescription(td),
+		InputSchema: cloneSchemaValue(td.InputSchema),
+	}
+	hideInputProperties(out.InputSchema, hiddenDisplayProps(td.Name))
+	return out
+}
+
+func displayToolDescription(td toolDef) string {
+	if desc, ok := conciseToolDescriptions[td.Name]; ok {
+		return desc
+	}
+	return td.Description
+}
+
+var conciseToolDescriptions = map[string]string{
+	"read_os":             "Agent 入口: 返回能力矩阵、推荐工作流、质量验收和本机 readiness; 不读取大量聊天正文。",
+	"messages":            "底层单会话消息读取。普通 agent 优先用 chat_timeline; 需要底层过滤或 raw view 时再用。",
+	"chat_timeline":       "普通读聊天首选入口: 解析 chat, live 读取消息, 返回 query/freshness/messages, 默认按聊天顺序展示最近窗口。",
+	"message_context":     "以 local_id/server_id 为锚点展开前后文; 返回与 timeline 同形的 messages, 附 context_role。",
+	"read_events":         "只读增量观察: chat 模式返回 message events, 无 chat 时返回 session/unread events; cursor 可原样续传。",
+	"media_resources":     "按 chat/local_id/server_id 定位图片、视频、文件等本机资源; 默认只暴露 agent 可直接读取的 path 或 concise warning。",
+	"search":              "跨会话或单会话关键词搜索; 走微信 live FTS, 返回可继续 context 的 talker/local_id。",
+	"search_with_context": "关键词搜索并展开命中上下文; 适合直接回答“这件事前后发生了什么”。",
+	"export_messages":     "显式本地文件导出; strict read-only 下禁用。普通读取优先 timeline/context。",
+	"cache_refresh":       "显式刷新 contacts/sessions metadata cache; strict read-only 下禁用。",
+	"cache_rebuild":       "显式重建 metadata cache; strict read-only 下禁用。",
+}
+
+func cloneSchemaValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = cloneSchemaValue(v)
 		}
-	case "export_messages":
-		return map[string]any{
-			"readOnlyHint":    false,
-			"destructiveHint": false,
-			"idempotentHint":  false,
-			"openWorldHint":   false,
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, v := range x {
+			out[i] = cloneSchemaValue(v)
 		}
+		return out
+	case []string:
+		out := make([]string, len(x))
+		copy(out, x)
+		return out
 	default:
-		return map[string]any{
-			"readOnlyHint":    true,
-			"destructiveHint": false,
-			"idempotentHint":  true,
-			"openWorldHint":   false,
-		}
+		return v
 	}
 }
 
+func hideInputProperties(schema any, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return
+	}
+	props, ok := m["properties"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, name := range names {
+		delete(props, name)
+	}
+}
+
+func hiddenDisplayProps(tool string) []string {
+	common := []string{"debug", "kind_name", "base_kind"}
+	out := append([]string{}, common...)
+	out = append(out, hiddenByTool[tool]...)
+	return out
+}
+
+var messageCursorAliasProps = []string{
+	"since_time", "since", "since_message",
+	"before_message_local_id", "after_message_local_id",
+	"before_local_id", "after_local_id",
+	"before_message_id", "after_message_id",
+	"before_message_server_id", "after_message_server_id",
+	"before_message_server_id_str", "after_message_server_id_str",
+}
+
+var hiddenByTool = map[string][]string{
+	"read_os": {"include_status"},
+	"resolve_chat": {
+		"chat", "keyword",
+	},
+	"messages": append(append([]string{}, messageCursorAliasProps...),
+		"view", "fields", "include_images"),
+	"chat_timeline": append(append([]string{}, messageCursorAliasProps...),
+		"include_images"),
+	"message_context": {
+		"message_local_id", "around_local_id",
+		"message_server_id", "message_server_id_str",
+		"around_server_id", "around_server_id_str",
+		"before_messages", "after_messages",
+	},
+	"read_events": {
+		"since", "after", "jsonl", "follow", "poll_interval",
+	},
+	"media_resources": {
+		"message_server_id", "message_server_id_str",
+		"resource_family", "resource_type_raw",
+	},
+	"search": {
+		"search_mode",
+	},
+	"search_with_context": {
+		"search_mode", "before_messages", "after_messages",
+	},
+	"sessions": {
+		"type_filter",
+	},
+	"contacts": {
+		"groups_only", "friends_only",
+	},
+	"group_members": {
+		"stats",
+	},
+	"export_messages": {
+		"kind_name", "base_kind",
+	},
+}
+
+func toolInProfile(name, profile string) bool {
+	switch profile {
+	case "assistant":
+		switch name {
+		case "read_os", "sessions", "resolve_chat", "contacts", "messages", "chat_timeline",
+			"message_context", "read_events", "media_resources", "group_members", "unread",
+			"stats", "favorites", "red_packets", "transfers", "sns_feed", "sns_search",
+			"sns_notifications", "search", "search_with_context", "chatroom_announcements",
+			"forward_history":
+			return true
+		}
+	case "maintenance":
+		switch name {
+		case "cache_status", "cache_refresh", "cache_rebuild", "export_messages", "schema", "sql":
+			return true
+		}
+	}
+	return false
+}
+
 var toolDefs = []toolDef{
+	{
+		Name: "read_os",
+		Description: "WeChat Read OS 总入口: 返回只读能力地图、覆盖率矩阵、推荐工作流、质量验收命令和本机读取状态. " +
+			"这是 agent 进入微信本地读取环境的第一入口; 不读取大量聊天正文, 不触发 key setup, 不修改微信数据. " +
+			"mode=overview 默认返回 status/entrypoints/workflows/coverage/quality_gates; coverage 只返回类型覆盖率; workflows 只返回入口和读法; status 只返回本机 readiness.",
+		InputSchema: jsonSchema(props{
+			"mode":           enumStrProp("overview (默认) / coverage / workflows / status", "overview", "coverage", "workflows", "status"),
+			"include_status": boolProp("overview 时是否包含本机状态 (默认 true)"),
+			"include_debug":  boolProp("是否暴露 db_root/config_path/wcdb_path 等本机诊断路径 (默认 false)"),
+			"debug":          boolProp("include_debug 的别名"),
+		}, nil),
+	},
 	{
 		Name: "sessions",
 		Description: "聊天会话列表, 按 sort_timestamp DESC. " +
@@ -125,47 +269,144 @@ var toolDefs = []toolDef{
 			"53=solitaire/57=quote/87=announcement/2000=transfer/2001=red_packet/62=pat/51=channel_video/3,76=music. " +
 			"after/before 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
-			"talker":              strProp("会话对象 (wxid 或 xxx@chatroom)"),
-			"chat":                strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
-			"limit":               intProp("返回条数 (默认 50)"),
-			"offset":              intProp("跳过条数 (默认 0)"),
-			"after":               strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"before":              strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"keyword":             strProp("消息内容关键词"),
-			"type":                strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
-			"kind_name":           strProp("可选: 同 type"),
-			"base_kind":           intProp("可选: base_kind raw int"),
-			"sender":              strProp("可选: sender wxid 或昵称"),
-			"view":                enumStrProp("返回视图: default 保持原 fields 输出; agent 返回低噪声扁平 timeline", "default", "agent"),
-			"order":               enumStrProp("查询顺序: desc 最近消息优先 (默认) / asc 最早消息优先", "desc", "asc"),
-			"display_order":       enumStrProp("输出展示顺序: query 保持查询顺序 (默认) / desc / asc; 用 order=desc + display_order=asc 展示最近 N 条的聊天顺序", "query", "desc", "asc"),
-			"fields":              enumStrProp("lite (默认) / full", "lite", "full"),
-			"include_media_paths": boolProp("是否补齐图片/视频/文件本机资源路径和 display-ready media refs (默认 true; 传 false 可关闭)"),
-			"include_debug":       boolProp("是否在 lite/agent 输出中包含调试媒体字段或 debug 节点 (默认 false)"),
-			"debug":               boolProp("include_debug 的别名"),
+			"talker":                       strProp("会话对象 (wxid 或 xxx@chatroom)"),
+			"chat":                         strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
+			"limit":                        intProp("返回条数 (默认 50)"),
+			"offset":                       intProp("跳过条数 (默认 0)"),
+			"after":                        strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"since_time":                   strProp("after 的小助手别名: 从这个本地时间之后读"),
+			"since":                        strProp("since_time 的别名"),
+			"before":                       strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before_message":               intProp("锚点 local_id; 返回该消息之前更旧的消息"),
+			"after_message":                intProp("锚点 local_id; 返回该消息之后更新的消息"),
+			"since_local_id":               intProp("after_message 的小助手别名: 从这个 local_id 之后读"),
+			"since_message":                intProp("since_local_id 的别名"),
+			"before_message_local_id":      intProp("before_message 的别名"),
+			"after_message_local_id":       intProp("after_message 的别名"),
+			"before_local_id":              intProp("before_message 的别名"),
+			"after_local_id":               intProp("after_message 的别名"),
+			"before_message_id":            intProp("before_message 的别名"),
+			"after_message_id":             intProp("after_message 的别名"),
+			"before_server_id":             intProp("锚点 server_id; 返回该消息之前更旧的消息"),
+			"after_server_id":              intProp("锚点 server_id; 返回该消息之后更新的消息"),
+			"before_server_id_str":         strProp("before_server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"after_server_id_str":          strProp("after_server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"before_message_server_id":     intProp("before_server_id 的别名"),
+			"after_message_server_id":      intProp("after_server_id 的别名"),
+			"before_message_server_id_str": strProp("before_server_id_str 的别名"),
+			"after_message_server_id_str":  strProp("after_server_id_str 的别名"),
+			"keyword":                      strProp("消息内容关键词"),
+			"type":                         strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name":                    strProp("可选: 同 type"),
+			"base_kind":                    intProp("可选: base_kind raw int"),
+			"sender":                       strProp("可选: sender wxid 或昵称"),
+			"view":                         enumStrProp("返回视图: default 保持原 fields 输出; agent 返回低噪声扁平 timeline", "default", "agent"),
+			"order":                        enumStrProp("查询顺序: desc 最近消息优先 (默认) / asc 最早消息优先", "desc", "asc"),
+			"display_order":                enumStrProp("输出展示顺序: query 保持查询顺序 (默认) / desc / asc; 用 order=desc + display_order=asc 展示最近 N 条的聊天顺序", "query", "desc", "asc"),
+			"fields":                       enumStrProp("lite (默认) / full", "lite", "full"),
+			"include_media_paths":          boolProp("是否补齐图片/视频/文件本机资源路径和 display-ready media refs (默认 true; 传 false 可关闭)"),
+			"include_debug":                boolProp("是否在 lite/agent 输出中包含调试媒体字段或 debug 节点 (默认 false)"),
+			"debug":                        boolProp("include_debug 的别名"),
 		}, nil),
 	},
 	{
 		Name:        "chat_timeline",
 		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; query 含 returned/limit/offset/has_more/next_offset 便于可靠分页爬全量; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
 		InputSchema: jsonSchema(props{
-			"talker":              strProp("会话对象 (wxid 或 xxx@chatroom)"),
-			"chat":                strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
-			"limit":               intProp("返回条数 (默认 50)"),
-			"offset":              intProp("跳过条数 (默认 0)"),
-			"after":               strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"before":              strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"keyword":             strProp("消息内容关键词"),
+			"talker":                       strProp("会话对象 (wxid 或 xxx@chatroom)"),
+			"chat":                         strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
+			"limit":                        intProp("返回条数 (默认 50)"),
+			"offset":                       intProp("跳过条数 (默认 0)"),
+			"after":                        strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"since_time":                   strProp("after 的小助手别名: 从这个本地时间之后读"),
+			"since":                        strProp("since_time 的别名"),
+			"before":                       strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before_message":               intProp("锚点 local_id; 返回该消息之前更旧的消息"),
+			"after_message":                intProp("锚点 local_id; 返回该消息之后更新的消息"),
+			"since_local_id":               intProp("after_message 的小助手别名: 从这个 local_id 之后读"),
+			"since_message":                intProp("since_local_id 的别名"),
+			"before_message_local_id":      intProp("before_message 的别名"),
+			"after_message_local_id":       intProp("after_message 的别名"),
+			"before_local_id":              intProp("before_message 的别名"),
+			"after_local_id":               intProp("after_message 的别名"),
+			"before_message_id":            intProp("before_message 的别名"),
+			"after_message_id":             intProp("after_message 的别名"),
+			"before_server_id":             intProp("锚点 server_id; 返回该消息之前更旧的消息"),
+			"after_server_id":              intProp("锚点 server_id; 返回该消息之后更新的消息"),
+			"before_server_id_str":         strProp("before_server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"after_server_id_str":          strProp("after_server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"before_message_server_id":     intProp("before_server_id 的别名"),
+			"after_message_server_id":      intProp("after_server_id 的别名"),
+			"before_message_server_id_str": strProp("before_server_id_str 的别名"),
+			"after_message_server_id_str":  strProp("after_server_id_str 的别名"),
+			"keyword":                      strProp("消息内容关键词"),
+			"type":                         strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name":                    strProp("可选: 同 type"),
+			"base_kind":                    intProp("可选: base_kind raw int"),
+			"sender":                       strProp("可选: sender wxid 或昵称"),
+			"order":                        enumStrProp("查询顺序: desc 最近消息优先 (默认) / asc 最早消息优先", "desc", "asc"),
+			"display_order":                enumStrProp("输出展示顺序: asc 默认聊天顺序 / desc / query", "query", "desc", "asc"),
+			"include_images":               boolProp("是否补齐图片/文件路径 (默认 true; false 时等价 include_media_paths=false)"),
+			"include_media_paths":          boolProp("是否补齐图片/视频/文件本机资源路径和 display-ready media refs (默认 true)"),
+			"include_debug":                boolProp("是否附带 debug 节点 (默认 false)"),
+			"debug":                        boolProp("include_debug 的别名"),
+		}, nil),
+	},
+	{
+		Name: "message_context",
+		Description: "以一条已知消息为锚点向前/向后展开上下文. 这是 search 结果、timeline 某条消息、用户指定 local_id/server_id 后继续读前后文的首选入口. " +
+			"输入 chat/talker + local_id 或 server_id/server_id_str; 返回 query/freshness/messages, messages 与 timeline agent 行同形, 额外带 context_role=before/anchor/after. " +
+			"默认 before_count=20、after_count=20、include_anchor=true、display_order=asc, 用 sort_seq/local_id 定位, 比只按时间更接近微信 UI 顺序. " +
+			"include_media_paths 默认 true; debug/include_debug 仅用于诊断媒体/解析 warning.",
+		InputSchema: jsonSchema(props{
+			"talker":                strProp("会话对象 (wxid 或 xxx@chatroom)"),
+			"chat":                  strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
+			"local_id":              intProp("锚点消息 local_id"),
+			"message_local_id":      intProp("local_id 的别名"),
+			"around_local_id":       intProp("local_id 的别名"),
+			"server_id":             intProp("锚点消息 server_id"),
+			"server_id_str":         strProp("锚点消息 server_id 字符串形式, 避免 64-bit JSON 精度损失"),
+			"message_server_id":     intProp("server_id 的别名"),
+			"message_server_id_str": strProp("message_server_id 字符串形式"),
+			"around_server_id":      intProp("server_id 的别名"),
+			"around_server_id_str":  strProp("server_id 字符串形式"),
+			"before_count":          intProp("锚点之前返回多少条 (默认 20, 最大 500)"),
+			"after_count":           intProp("锚点之后返回多少条 (默认 20, 最大 500)"),
+			"before_messages":       intProp("before_count 的别名"),
+			"after_messages":        intProp("after_count 的别名"),
+			"limit":                 intProp("before_count/after_count 都未传时的共同窗口大小"),
+			"include_anchor":        boolProp("是否包含锚点消息 (默认 true)"),
+			"display_order":         enumStrProp("输出展示顺序: asc 默认聊天顺序 / desc", "asc", "desc"),
+			"include_media_paths":   boolProp("是否补齐图片/视频/文件本机资源路径和 display-ready media refs (默认 true)"),
+			"include_debug":         boolProp("是否附带 debug 节点 (默认 false)"),
+			"debug":                 boolProp("include_debug 的别名"),
+		}, nil),
+	},
+	{
+		Name: "read_events",
+		Description: "只读事件观察入口, 用于小助手增量观察微信而不发送、不控制 UI. " +
+			"chat/talker 存在时返回 message events, event.message 与 timeline agent row 同形; 不传 chat 时返回 session/unread events. " +
+			"cursor 可直接传回下一次调用; since_local_id/since_time 用于首次建立游标. CLI 的 tail/watch 支持 --jsonl 一次性输出事件行, --follow 按 poll_interval 轮询.",
+		InputSchema: jsonSchema(props{
+			"mode":                enumStrProp("auto (默认) / messages / sessions", "auto", "messages", "sessions"),
+			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom; 存在时观察该会话新消息"),
+			"chat":                strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
+			"cursor":              strProp("上次返回的 cursor; message 形如 local_id:123, session 形如 session:1780560000"),
+			"since_local_id":      intProp("首次观察某会话时的 local_id 游标; 等价 after_message"),
+			"since_time":          strProp("首次观察时的起始时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"since":               strProp("since_time 的别名"),
+			"after":               strProp("since_time 的兼容别名"),
 			"type":                strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
 			"kind_name":           strProp("可选: 同 type"),
-			"base_kind":           intProp("可选: base_kind raw int"),
 			"sender":              strProp("可选: sender wxid 或昵称"),
-			"order":               enumStrProp("查询顺序: desc 最近消息优先 (默认) / asc 最早消息优先", "desc", "asc"),
-			"display_order":       enumStrProp("输出展示顺序: asc 默认聊天顺序 / desc / query", "query", "desc", "asc"),
-			"include_images":      boolProp("是否补齐图片/文件路径 (默认 true; false 时等价 include_media_paths=false)"),
-			"include_media_paths": boolProp("是否补齐图片/视频/文件本机资源路径和 display-ready media refs (默认 true)"),
+			"limit":               intProp("返回事件条数 (默认 50)"),
+			"scan_limit":          intProp("mode=sessions 时内部扫描会话条数 (默认等于 limit)"),
+			"include_media_paths": boolProp("message events 是否补齐图片/视频/文件路径 (默认 true)"),
 			"include_debug":       boolProp("是否附带 debug 节点 (默认 false)"),
 			"debug":               boolProp("include_debug 的别名"),
+			"jsonl":               boolProp("CLI-only: 每个 event 输出一行 JSON"),
+			"follow":              boolProp("CLI-only: 持续轮询输出 JSONL"),
+			"poll_interval":       strProp("CLI-only: follow 轮询间隔, 如 2s; 纯数字按秒"),
 		}, nil),
 	},
 	{
@@ -285,6 +526,33 @@ var toolDefs = []toolDef{
 		}, []string{"keyword"}),
 	},
 	{
+		Name: "search_with_context",
+		Description: "跨会话关键词搜索并自动展开每个命中附近的上下文. 这是 agent 调查问题的高层入口: 先用微信 live FTS 找命中, 再用 live message DB 按 local_id 展开 before/anchor/after. " +
+			"返回 query/freshness/hits; hits[].message 是低噪声搜索命中, hits[].context 是 message_context 同形输出. " +
+			"limit 控制搜索命中数; context_limit 控制前多少个命中展开上下文 (默认 min(limit,5), 最大 20); before_count/after_count 默认 5.",
+		InputSchema: jsonSchema(props{
+			"keyword":             strProp("搜索关键词"),
+			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom"),
+			"chat":                strProp("可选: 限定昵称/备注/群名, 自动解析为 talker"),
+			"after":               strProp("可选: 起始时间"),
+			"before":              strProp("可选: 截止时间"),
+			"type":                strProp("可选: kind_name, 如 text/image/link/file/quote/transfer/red_packet"),
+			"kind_name":           strProp("可选: 同 type"),
+			"base_kind":           intProp("可选: base_kind raw int"),
+			"sender":              strProp("可选: sender wxid 或昵称"),
+			"search_mode":         enumStrProp("兼容参数: fts (默认) / like / auto; 当前都走微信 live FTS", "fts", "like", "auto"),
+			"limit":               intProp("搜索命中条数 (默认 20)"),
+			"context_limit":       intProp("展开上下文的命中条数 (默认 min(limit,5), 最大 20)"),
+			"before_count":        intProp("每个命中之前返回多少条 (默认 5, 最大 500)"),
+			"after_count":         intProp("每个命中之后返回多少条 (默认 5, 最大 500)"),
+			"before_messages":     intProp("before_count 的别名"),
+			"after_messages":      intProp("after_count 的别名"),
+			"include_media_paths": boolProp("是否补齐上下文里的图片/视频/文件路径 (默认 true)"),
+			"include_debug":       boolProp("是否附带 debug 节点 (默认 false)"),
+			"debug":               boolProp("include_debug 的别名"),
+		}, []string{"keyword"}),
+	},
+	{
 		Name: "sql",
 		Description: "本地 WCDB SQL. OS 级 readonly (SQLITE_OPEN_READONLY 打开), DDL/DML 会 rc≠0 直接报错 — " +
 			"SELECT/WITH 默认外层限流; PRAGMA/EXPLAIN 允许直接执行. " +
@@ -380,7 +648,7 @@ var toolDefs = []toolDef{
 	{
 		Name: "cache_refresh",
 		Description: "刷新 metadata snapshot cache 并重建统一 index.sqlite. 默认只 snapshot contact/contact.db 和 session/session.db; 聊天正文现查. " +
-			"background=true 立即返回并在后台刷新, 避免 MCP 调用超时.",
+			"background=true 立即返回并在后台刷新, 避免长时间阻塞 agent 运行.",
 		InputSchema: jsonSchema(props{
 			"force":      boolProp("强制重建所有 plaintext snapshots"),
 			"background": boolProp("后台刷新并立即返回"),

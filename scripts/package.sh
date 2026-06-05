@@ -3,7 +3,6 @@
 # install.sh + one-line release helper + docs. Friend/agent 解压后跑
 # `./install.sh --yes --json` 安装 CLI；需要首次 key/cache 初始化时再跑
 # `./install.sh --all --yes --json`.
-# 如需兼容旧 MCP 客户端, 显式追加 `--mcp` 注册 `wechat-cli serve-mcp`.
 # 前提: 若目标机器没有现成 schema-2 key map, ./install.sh --all 会跑
 # ./wxkey bootstrap; 它会走 no-SIP + Keychain sudo + ad-hoc 重签路线完成首次
 # key 初始化. wechat-cli 运行时解密不要求关闭 SIP.
@@ -44,9 +43,11 @@ echo "→ bundling libWCDB.dylib ($(du -h "$DYLIB_SRC" | cut -f1))..."
 cp "$DYLIB_SRC" "$DIST/libWCDB.dylib"
 
 echo "→ copying docs..."
-cp README.md llms.txt LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md mcp-server.json "$DIST/"
+cp README.md llms.txt LICENSE SECURITY.md THIRD_PARTY_NOTICES.md AGENTS.md "$DIST/"
 mkdir -p "$DIST/scripts"
 cp scripts/install-release.sh "$DIST/scripts/"
+cp scripts/wechat-read-regression.sh "$DIST/scripts/"
+chmod +x "$DIST/scripts/wechat-read-regression.sh"
 
 echo "→ copying installer..."
 cp install.sh "$DIST/"
@@ -54,6 +55,10 @@ chmod +x "$DIST/install.sh"
 
 echo "→ zipping..."
 cd dist
+rm -f "wechat-cli-v${VERSION}-darwin-arm64.zip" \
+  "wechat-cli-v${VERSION}-darwin-arm64.zip.sha256" \
+  "wechat-cli-latest-darwin-arm64.zip" \
+  "wechat-cli-latest-darwin-arm64.zip.sha256"
 zip -qr "wechat-cli-v${VERSION}-darwin-arm64.zip" "wechat-cli-v${VERSION}-darwin-arm64"
 shasum -a 256 "wechat-cli-v${VERSION}-darwin-arm64.zip" > "wechat-cli-v${VERSION}-darwin-arm64.zip.sha256"
 cp "wechat-cli-v${VERSION}-darwin-arm64.zip" "wechat-cli-latest-darwin-arm64.zip"

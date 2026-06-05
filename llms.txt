@@ -1,11 +1,10 @@
 # wechat-cli
 
-WeChat/微信 local chat history CLI for macOS and Windows agents. It outputs stable JSON by default and keeps an optional MCP stdio adapter at `wechat-cli serve-mcp` for compatibility.
+WeChat/微信 local chat history CLI for macOS and Windows agents. It outputs stable JSON by default and exposes a CLI-only interface.
 
 Use for:
 - local WeChat messages, contacts, groups, media, search, Moments, favorites, transfers, red packets
 - agent workflows that need schema-like JSON, pagination, freshness diagnostics, and readable local media paths
-- MCP compatibility only when an MCP client explicitly requires it
 
 Do not use for:
 - sending messages, controlling the WeChat UI, Accessibility automation, Official Account publishing, Mini Program devtools, WeCom bots, or reply bots
@@ -18,7 +17,7 @@ Install:
 - Windows:
   1. `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
   2. `wechat-cli sessions --limit 5 --pretty`
-- Default install is CLI-only: no MCP registration, no watcher.
+- Default install is CLI-only: no external protocol registration, no watcher.
 - The final `sessions --limit 5 --pretty` command is the user-facing success test: `ok: true` plus recent sessions means install, key setup, and DB reads are working.
 - macOS first key setup is explicit and quality-first: `wxkey bootstrap` may take several minutes; do not interrupt it just because the key scan or PBKDF fallback is still running.
 - On WeChat 4.1.10+, `wxkey bootstrap` may first show passive scan `found=0` or `initial passive scan did not capture DB keys before its deadline`, then continue into `PBKDF breakpoint fallback`; this is expected when the final output reaches `[OK] key config written`.
@@ -26,7 +25,6 @@ Install:
 - If `PBKDF fallback found no keys`, inspect the following `PBKDF diagnostics`: `pbkdf_calls=0` means the LLDB-launched WeChat did not trigger DB decryption; `pbkdf_calls>0` with `matching_db_salt_calls=0` usually means wrong DB root/account; matched salts with no verified key suggests a WeChat derivation change or unsupported build.
 - `PBKDF fallback got partial key coverage (24/26)` is not an install failure. It means most DB keys were captured and core chats are usually readable; verify with `wechat-cli sessions --limit 5 --pretty`, then open missing WeChat pages and rerun `wxkey bootstrap` or `wxkey doctor` only if specific data is missing.
 - If `wechat-cli --help` immediately prints `zsh: killed`, reinstall/update with the latest release bootstrap. The macOS installer uses temporary files, ad-hoc codesign, and atomic rename so updates do not in-place overwrite the running Mach-O.
-- Optional MCP: pass `--mcp` on macOS or `-Mcp` on Windows; clients must invoke `wechat-cli serve-mcp`.
 
 Update:
 - Preferred: `wechat-cli update`
@@ -54,21 +52,45 @@ Release assets:
 
 Core commands:
 - `wechat-cli update`
+- `wechat-cli agent --pretty`
+- `wechat-cli status --pretty`
+- `wechat-cli coverage --pretty`
+- `wechat-cli workflows --pretty`
 - `wechat-cli sessions`
-- `wechat-cli resolve-chat "张三"`
-- `wechat-cli timeline "某群" --limit 20`
-- `wechat-cli history "张三" --view agent --limit 50`
-- `wechat-cli search "关键词" --in "某群"`
-- `wechat-cli media "某群" --type image --limit 10`
+- `wechat-cli resolve-chat "$CHAT"`
+- `wechat-cli timeline "$CHAT" --limit 20`
+- `wechat-cli context "$CHAT" --local-id 123 --before-count 20 --after-count 20`
+- `wechat-cli tail "$CHAT" --since-local-id 123 --jsonl`
+- `wechat-cli search-context "$KEYWORD" --in "$CHAT" --context-limit 3`
+- `wechat-cli timeline "$CHAT" --before-message 123 --limit 20`
+- `wechat-cli history "$CHAT" --view agent --limit 50`
+- `wechat-cli search "$KEYWORD" --in "$CHAT"`
+- `wechat-cli media "$CHAT" --type image --limit 10`
 - `wechat-cli tools`
+- `wechat-cli tools --profile all`
 - `wechat-cli call <tool> --key value`
 - `wechat-cli call-json <tool> '{"key":"value"}'`
-- `printf '{"chat":"张三","limit":20}' | wechat-cli call-json chat_timeline`
+- `printf '{"chat":"$CHAT","limit":20}' | wechat-cli call-json chat_timeline`
+- `wechat-cli --strict-read-only timeline "$CHAT" --limit 20`
 
 Agent defaults:
+- Use `agent` as the WeChat Read OS entrypoint for coverage matrix, workflows,
+  quality gates, and readiness status. Use `status`, `coverage`, or
+  `workflows` for smaller slices.
 - Prefer `timeline` for normal chat reading.
+- Use `context` after search/timeline to expand surrounding messages from a
+  known local_id/server_id; output rows match timeline and add context_role.
+- Use `tail` / `watch` for read-only incremental observation. With a chat,
+  `event.message` matches timeline rows; without a chat, `--mode sessions`
+  returns session/unread events. Reuse the returned cursor. `--jsonl`/`--follow`
+  emit newline-delimited event objects without the standard envelope.
+- Use `search-context` for keyword investigations that need surrounding
+  conversation immediately.
+- Use `timeline --before-message/--after-message` for anchor-based paging.
 - Use `resolve-chat` before passing human names to lower-level commands.
 - Treat `freshness`, `warnings`, `errors`, `parse_error`, and per-record `error` as actionable diagnostics.
+- Default tool schemas are slim/canonical for agents. Use `tool-schema <command> --profile all` or `tools --profile all` only for compatibility aliases and maintenance/debug fields.
+- Strict local read-only mode is `WECHAT_CLI_STRICT_READ_ONLY=1` or `--strict-read-only`; it disables auto refresh, local media/voice cache writes, cache refresh/rebuild, and export.
 - Default media output should contain only directly readable local `path` values. Raw `.dat`, raw SILK, CDN/aeskey, raw XML, candidate paths, and decode internals require debug/full options.
 - `wechat-cli` best-effort decodes WeChat V4 image `.dat` into `~/.wechat-cli/media-cache`; if image keys are missing/stale it runs `wxkey image-key` and retries.
 - `wechat-cli` does not perform visual recognition.
@@ -77,11 +99,13 @@ Freshness:
 - Metadata cache is for contacts/sessions/name resolution only.
 - Message reads query source DBs live.
 - Normal name/session reads freshness-check and refresh metadata before returning.
-- There is no global message-body cache or global `new_messages` stream.
+- There is no global message-body cache. `tail` provides read-only polling
+  events over live chat reads or metadata session changes; it does not send or
+  control WeChat.
 
 Privacy:
 - Local read-only database access.
 - Do not upload key config, WeChat DBs, exports, screenshots, cache directories, or logs.
 
 One-sentence summary:
-Local-data WeChat CLI for macOS and Windows agents. It lets agents read and search the user's own WeChat messages, media, contacts, Moments, transfers, and red packets through JSON commands. Use `wechat-cli serve-mcp` only for explicit MCP compatibility.
+Local-data WeChat CLI for macOS and Windows agents. It lets agents read and search the user's own WeChat messages, media, contacts, Moments, transfers, and red packets through JSON commands.

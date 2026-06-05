@@ -6,9 +6,7 @@ param(
   [string]$Tag = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_TAG)) { $env:WECHAT_CLI_RELEASE_TAG } else { $env:WX_MCP_RELEASE_TAG }),
   [string]$Asset = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_RELEASE_ASSET)) { $env:WECHAT_CLI_RELEASE_ASSET } else { $env:WX_MCP_RELEASE_ASSET }),
   [string]$InstallDir = $(if (-not [string]::IsNullOrWhiteSpace($env:WECHAT_CLI_INSTALL_DIR)) { $env:WECHAT_CLI_INSTALL_DIR } else { $env:WX_MCP_INSTALL_DIR }),
-  [string]$McpClient = "",
-  [switch]$Mcp,
-  [switch]$NoMcp,
+  [switch]$All,
   [switch]$BackgroundRefresh,
   [switch]$KeepDownload
 )
@@ -130,7 +128,8 @@ try {
   $installerArgs = @()
   if ($Update) {
     $installerArgs += "-Update"
-  } else {
+  }
+  if ($All) {
     $installerArgs += "-All"
   }
   $installerArgs += "-Yes"
@@ -139,11 +138,6 @@ try {
   if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
     $installerArgs += @("-InstallDir", $InstallDir)
   }
-  if (-not [string]::IsNullOrWhiteSpace($McpClient)) {
-    $installerArgs += @("-McpClient", $McpClient)
-  }
-  if ($Mcp) { $installerArgs += "-Mcp" }
-  if ($NoMcp) { $installerArgs += "-NoMcp" }
   if ($BackgroundRefresh) { $installerArgs += "-BackgroundRefresh" }
 
   Write-Step "Running bundled installer from $($installer.DirectoryName)"

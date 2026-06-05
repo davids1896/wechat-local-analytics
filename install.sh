@@ -3,8 +3,6 @@ set -u
 
 APP_NAME="wechat-cli"
 LEGACY_APP_NAME="wx-mcp"
-MCP_NAME="wechat-cli"
-LEGACY_MCP_NAME="wx-mcp"
 WATCHER_LABEL="com.r266.wechat-cli-cache-watcher"
 LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
 SOURCE_DIR="${0:A:h}"
@@ -18,8 +16,6 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
 LEGACY_PLIST_PATH="$LAUNCH_AGENTS_DIR/$LEGACY_WATCHER_LABEL.plist"
 WATCHER_INTERVAL=300
-MCP_CLIENT="none"
-MCP_SCOPE="user"
 
 JSON=0
 ASSUME_YES=0
@@ -28,8 +24,6 @@ MODE="install"
 DO_BOOTSTRAP=0
 DO_REFRESH=0
 DO_WATCHER=0
-REGISTER_MCP=0
-MCP_OPTION_SEEN=0
 PURGE_STATE=0
 
 CLI_MODE=""
@@ -38,7 +32,6 @@ WXKEY_MODE=""
 WXKEY_SOURCE=""
 LIB_SOURCE=""
 
-MCP_REGISTERED=0
 WATCHER_INSTALLED=0
 BOOTSTRAP_RAN=0
 REFRESH_RAN=0
@@ -50,7 +43,6 @@ typeset -a ACTIONS
 typeset -a WARNINGS
 typeset -a ERRORS
 typeset -a CHECKS
-typeset -a MCP_REGISTERED_CLIENTS
 
 usage() {
   cat <<'EOF'
@@ -65,13 +57,13 @@ Usage:
 
 Install options:
   --all                     Install CLI, run wxkey bootstrap, and refresh
-                            metadata cache (does NOT register MCP or install watcher;
-                            add --watcher explicitly if you want periodic
+                            metadata cache (does NOT install watcher; add
+                            --watcher explicitly if you want periodic
                             background refresh — see README on TCC trade-off).
   --update                  Update an existing git checkout with
                             `git pull --ff-only`, then reinstall binaries.
-                            Does not bootstrap, refresh metadata cache, register MCP,
-                            or touch watcher unless those flags are added.
+                            Does not bootstrap, refresh metadata cache, or
+                            touch watcher unless those flags are added.
   --bootstrap               Run wxkey bootstrap after installing binaries.
   --refresh                 Start wechat-cli metadata cache refresh after installing binaries.
                             Defaults to background warmup; set
@@ -81,9 +73,6 @@ Install options:
                             triggers a "wechat-cli wants to access another app's
                             data" TCC prompt unless wechat-cli has Full Disk Access
                             granted in System Settings → Privacy & Security.
-  --mcp                     Register the optional legacy MCP adapter.
-  --no-mcp                  Do not register MCP (default).
-  --mcp-client auto|claude|codex|none
   --install-dir PATH        Default: ~/.local/share/wechat-cli
   --bin-dir PATH            Directory for the `wechat-cli` command shim.
                             Default: ~/.local/bin
@@ -92,12 +81,11 @@ Install options:
   --json                    Emit a single JSON result to stdout.
   --dry-run                 Report planned actions without writing.
   --doctor                  Check local install prerequisites/status.
-  --uninstall               Remove installed files, watcher plist, and optional MCP entries.
+  --uninstall               Remove installed files and watcher plist.
   --purge-state             With --uninstall, also remove wechat-cli state:
                             ~/.config/wxcli/config.json, ~/.wechat-cli, legacy ~/.wx-mcp, logs,
                             and the wxkey Keychain sudo credential.
-  --clear-state             Only remove wechat-cli state; keep installed binaries
-                            and optional MCP entries.
+  --clear-state             Only remove wechat-cli state; keep installed binaries.
 
 Environment:
   WECHAT_CLI_INSTALL_DIR    Override install directory. WX_MCP_INSTALL_DIR still works.
@@ -166,17 +154,13 @@ emit_json() {
   print "  \"install_dir\": \"$(json_escape "$INSTALL_DIR")\","
   print "  \"bin_dir\": \"$(json_escape "$BIN_DIR")\","
   print "  \"shim_path\": \"$(json_escape "$SHIM_PATH")\","
-  print "  \"mcp_client\": \"$(json_escape "$MCP_CLIENT")\","
-  print "  \"mcp_scope\": \"$(json_escape "$MCP_SCOPE")\","
   print "  \"watcher_label\": \"$(json_escape "$WATCHER_LABEL")\","
   print "  \"watcher_interval\": $WATCHER_INTERVAL,"
   print "  \"log\": \"$(json_escape "$INSTALL_LOG")\","
-  print "  \"mcp_registered\": $(json_bool "$MCP_REGISTERED"),"
   print "  \"watcher_installed\": $(json_bool "$WATCHER_INSTALLED"),"
   print "  \"bootstrap_ran\": $(json_bool "$BOOTSTRAP_RAN"),"
   print "  \"refresh_ran\": $(json_bool "$REFRESH_RAN"),"
   print "  \"purge_state\": $(json_bool "$PURGE_STATE"),"
-  print -n "  \"mcp_registered_clients\": "; json_array "${MCP_REGISTERED_CLIENTS[@]}"; print ","
   print -n "  \"checks\": "; json_array "${CHECKS[@]}"; print ","
   print -n "  \"actions\": "; json_array "${ACTIONS[@]}"; print ","
   print -n "  \"warnings\": "; json_array "${WARNINGS[@]}"; print ","
@@ -197,11 +181,6 @@ print_human_result() {
   print "  command: $SHIM_PATH"
   [[ -n "$BLOCKED_BY" ]] && print "  blocked_by: $BLOCKED_BY"
   [[ -n "$NEXT_ACTION" ]] && print "  next: $NEXT_ACTION"
-  if [[ "${#MCP_REGISTERED_CLIENTS[@]}" -gt 0 ]]; then
-    print "  mcp_registered: ${(j:, :)MCP_REGISTERED_CLIENTS}"
-  elif [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]]; then
-    print "  mcp_registered: no supported client command found"
-  fi
   [[ "$BOOTSTRAP_RAN" -eq 1 ]] && print "  key_setup: complete"
   [[ "$REFRESH_RAN" -eq 1 ]] && print "  metadata_cache: started"
   [[ "$WATCHER_INSTALLED" -eq 1 ]] && print "  watcher: installed"
@@ -427,8 +406,6 @@ parse_args() {
       --clear-state)
         MODE="clear-state"
         PURGE_STATE=1
-        REGISTER_MCP=0
-        MCP_CLIENT="none"
         shift
         ;;
       --purge-state)
@@ -446,12 +423,6 @@ parse_args() {
         # cross-container access triggers TCC re-prompts ("wechat-cli 想访问其他
         # App 的数据") repeatedly for ad-hoc signed binaries. Users who
         # actually want background metadata cache refresh can pass --watcher.
-        shift
-        ;;
-      --mcp)
-        MCP_OPTION_SEEN=1
-        REGISTER_MCP=1
-        MCP_CLIENT="auto"
         shift
         ;;
       --bootstrap)
@@ -476,25 +447,6 @@ parse_args() {
         ;;
       --no-watcher)
         DO_WATCHER=0
-        shift
-        ;;
-      --no-mcp)
-        MCP_OPTION_SEEN=1
-        REGISTER_MCP=0
-        MCP_CLIENT="none"
-        shift
-        ;;
-      --mcp-client)
-        [[ "$#" -ge 2 ]] || die "--mcp-client requires a value" 2
-        MCP_OPTION_SEEN=1
-        MCP_CLIENT="$2"
-        [[ "$MCP_CLIENT" == "none" ]] && REGISTER_MCP=0 || REGISTER_MCP=1
-        shift 2
-        ;;
-      --mcp-client=*)
-        MCP_OPTION_SEEN=1
-        MCP_CLIENT="${1#*=}"
-        [[ "$MCP_CLIENT" == "none" ]] && REGISTER_MCP=0 || REGISTER_MCP=1
         shift
         ;;
       --install-dir)
@@ -530,22 +482,10 @@ parse_args() {
     esac
   done
 
-  case "$MCP_CLIENT" in
-    auto|claude|codex|none) ;;
-    *) die "--mcp-client must be auto, claude, codex, or none" 2 ;;
-  esac
   if [[ "$PURGE_STATE" -eq 1 && "$MODE" != "uninstall" && "$MODE" != "clear-state" ]]; then
     die "--purge-state is only valid with --uninstall; use --clear-state to remove state without uninstalling" 2
   fi
-  if [[ "$MODE" == "clear-state" ]]; then
-    REGISTER_MCP=0
-    MCP_CLIENT="none"
-  fi
-  if [[ "$MODE" == "uninstall" && "$MCP_OPTION_SEEN" -eq 0 ]]; then
-    REGISTER_MCP=1
-    MCP_CLIENT="auto"
-  fi
-  [[ "$WATCHER_INTERVAL" == <-> ]] || die "--watcher-interval must be an integer" 2
+  [[ "$WATCHER_INTERVAL" =~ ^[0-9]+$ ]] || die "--watcher-interval must be an integer" 2
   if [[ "$WATCHER_INTERVAL" -lt 60 ]]; then
     warn "watcher interval below 60s is allowed but may overlap long metadata cache refreshes"
   fi
@@ -703,85 +643,6 @@ update_source() {
     return
   fi
   warn "source_dir is not a git checkout; --update will install the release files in this directory. If you are not using install-release.sh, download the newest release zip first."
-}
-
-register_mcp() {
-  [[ "$REGISTER_MCP" -eq 1 ]] || return
-
-  local client="$MCP_CLIENT"
-  if [[ "$client" == "auto" ]]; then
-    local found=0
-    if have_cmd claude; then
-      register_claude_mcp
-      found=1
-    fi
-    if have_cmd codex; then
-      register_codex_mcp
-      found=1
-    fi
-    if [[ "$found" -eq 0 ]]; then
-      warn "no supported MCP client command found; skipping MCP registration"
-    fi
-    return
-  fi
-  if [[ "$client" == "none" ]]; then
-    return
-  fi
-  case "$client" in
-    claude) register_claude_mcp ;;
-    codex) register_codex_mcp ;;
-  esac
-}
-
-register_claude_mcp() {
-  if ! have_cmd claude; then
-    die "claude command not found; use --mcp-client none or install Claude Code" 1
-  fi
-  ACTIONS+=("register Claude MCP server $MCP_NAME at $INSTALL_DIR/$APP_NAME serve-mcp")
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    return
-  fi
-
-  run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
-  run_logged claude mcp remove -s "$MCP_SCOPE" "$LEGACY_MCP_NAME" || true
-  run_logged claude mcp add -s "$MCP_SCOPE" "$MCP_NAME" "$INSTALL_DIR/$APP_NAME" serve-mcp || die "Claude MCP registration failed; see $INSTALL_LOG" 1
-  MCP_REGISTERED=1
-  MCP_REGISTERED_CLIENTS+=("claude")
-}
-
-register_codex_mcp() {
-  if ! have_cmd codex; then
-    die "codex command not found; use --mcp-client none or install Codex CLI" 1
-  fi
-  ACTIONS+=("register Codex MCP server $MCP_NAME at $INSTALL_DIR/$APP_NAME serve-mcp")
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    return
-  fi
-
-  run_logged codex mcp remove "$MCP_NAME" || true
-  run_logged codex mcp remove "$LEGACY_MCP_NAME" || true
-  run_logged codex mcp add "$MCP_NAME" -- "$INSTALL_DIR/$APP_NAME" serve-mcp || die "Codex MCP registration failed; see $INSTALL_LOG" 1
-  MCP_REGISTERED=1
-  MCP_REGISTERED_CLIENTS+=("codex")
-}
-
-remove_mcp_entries() {
-  [[ "$REGISTER_MCP" -eq 1 && "$MCP_CLIENT" != "none" ]] || return
-  local client="$MCP_CLIENT"
-  if [[ "$client" == "auto" || "$client" == "claude" ]]; then
-    ACTIONS+=("remove Claude MCP server $MCP_NAME and legacy $LEGACY_MCP_NAME")
-    if [[ "$DRY_RUN" -eq 0 && -n "$(command -v claude 2>/dev/null)" ]]; then
-      run_logged claude mcp remove -s "$MCP_SCOPE" "$MCP_NAME" || true
-      run_logged claude mcp remove -s "$MCP_SCOPE" "$LEGACY_MCP_NAME" || true
-    fi
-  fi
-  if [[ "$client" == "auto" || "$client" == "codex" ]]; then
-    ACTIONS+=("remove Codex MCP server $MCP_NAME and legacy $LEGACY_MCP_NAME")
-    if [[ "$DRY_RUN" -eq 0 && -n "$(command -v codex 2>/dev/null)" ]]; then
-      run_logged codex mcp remove "$MCP_NAME" || true
-      run_logged codex mcp remove "$LEGACY_MCP_NAME" || true
-    fi
-  fi
 }
 
 classify_install_log_blocker() {
@@ -1135,7 +996,6 @@ uninstall() {
   remove_cli_shims
   ACTIONS+=("remove install dir $INSTALL_DIR")
   ACTIONS+=("remove legacy install dir $LEGACY_INSTALL_DIR")
-  remove_mcp_entries
   if [[ "$PURGE_STATE" -eq 1 ]]; then
     queue_purge_state_actions
   fi
@@ -1181,7 +1041,6 @@ main() {
       install_components
       install_cli_shim
       cleanup_legacy_message_cache
-      register_mcp
       run_bootstrap
       run_cache_refresh
       install_watcher
@@ -1194,7 +1053,6 @@ main() {
       install_components
       install_cli_shim
       cleanup_legacy_message_cache
-      register_mcp
       run_bootstrap
       run_cache_refresh
       install_watcher

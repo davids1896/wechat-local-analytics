@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -40,47 +39,10 @@ import (
 	"github.com/r266-tech/wechat-cli/internal/wxparse"
 )
 
-// ──────────────────── MCP protocol types ────────────────────
-
-type rpcRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id,omitempty"` // nil for notifications
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type rpcResponse struct {
-	JSONRPC string  `json:"jsonrpc"`
-	ID      any     `json:"id"`
-	Result  any     `json:"result,omitempty"`
-	Error   *rpcErr `json:"error,omitempty"`
-}
-
-type rpcErr struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
 type toolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema any            `json:"inputSchema"`
-	Annotations map[string]any `json:"annotations,omitempty"`
-}
-
-type toolCallParams struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
-}
-
-type toolResult struct {
-	Content []contentBlock `json:"content"`
-	IsError bool           `json:"isError,omitempty"`
-}
-
-type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	InputSchema any    `json:"inputSchema"`
 }
 
 // ──────────────────── server state ────────────────────
@@ -144,9 +106,14 @@ func (s *server) ensure() error {
 		if cfg.Wxid == "" {
 			cfg.Wxid = wxid
 		}
-		_ = config.Save(cfg)
+		if !strictReadOnlyMode() {
+			_ = config.Save(cfg)
+		}
 	}
 	if !cfg.Ready() {
+		if strictReadOnlyMode() {
+			return fmt.Errorf("strict_read_only: key config is missing; run wxkey/bootstrap or cache refresh outside strict read-only mode, then retry")
+		}
 		s.cfg = cfg
 		s.wcdbPath = wcdbPath
 		if err := s.refreshKeysFromWxkey("no schema-2 DB keys cached"); err != nil {
@@ -161,6 +128,9 @@ func (s *server) ensure() error {
 }
 
 func (s *server) refreshKeysFromWxkey(reason string) error {
+	if strictReadOnlyMode() {
+		return fmt.Errorf("strict_read_only: automatic key refresh is disabled (%s)", reason)
+	}
 	s.keyRefreshMu.Lock()
 	defer s.keyRefreshMu.Unlock()
 
@@ -249,6 +219,9 @@ func mergeRuntimeKeyConfig(oldCfg, fresh *config.Config) *config.Config {
 }
 
 func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
+	if strictReadOnlyMode() {
+		return fmt.Errorf("strict_read_only: automatic image-key refresh is disabled (%s)", reason)
+	}
 	if envFirst("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY") != "" {
 		return fmt.Errorf("WECHAT_CLI_IMAGE_KEY is set; not overriding explicit image_key env")
 	}
@@ -474,101 +447,6 @@ func main() {
 		printCLIUsage()
 	}
 	os.Exit(2)
-}
-
-func runMCPServer() {
-	srv := &server{}
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 4*1024*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var req rpcRequest
-		if json.Unmarshal(line, &req) != nil {
-			continue
-		}
-		if req.ID == nil { // notification — no response
-			continue
-		}
-		resp := srv.handle(req)
-		out, _ := json.Marshal(resp)
-		fmt.Fprintf(os.Stdout, "%s\n", out)
-	}
-}
-
-func (s *server) handle(req rpcRequest) rpcResponse {
-	switch req.Method {
-	case "initialize":
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": appName, "version": appVersion},
-			"instructions": "Errors and partial-success signals are embedded in normal tool returns — read them, don't paper over.\n" +
-				"- Per-record `error` fields (e.g. `no enc_key for salt ...`) mean that specific db is unreadable; surface that to the user, do not silently treat it as `no data`.\n" +
-				"- wechat-cli automatically refreshes missing DB enc_keys and WeChat V4 image_key when the stored no-SIP wxkey credential is available; if a tool still returns warnings/errors, surface the exact reason and next action.\n" +
-				"- Freshness check: `sessions limit=1`, compare `last_timestamp` to now. Stale by hours = WeChat likely not running.",
-		}}
-	case "tools/list":
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": listedToolDefs()}}
-	case "tools/call":
-		var p toolCallParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: errResult("invalid tools/call params: " + err.Error())}
-		}
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: s.callTool(p)}
-	default:
-		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: &rpcErr{Code: -32601, Message: "unknown method"}}
-	}
-}
-
-func (s *server) callTool(p toolCallParams) toolResult {
-	handlers := map[string]func(map[string]any) (any, error){
-		"sessions":               s.toolSessions,
-		"resolve_chat":           s.toolResolveChat,
-		"contacts":               s.toolContacts,
-		"messages":               s.toolMessages,
-		"chat_timeline":          s.toolChatTimeline,
-		"media_resources":        s.toolMediaResources,
-		"group_members":          s.toolGroupMembers,
-		"sns":                    s.toolSns,
-		"sns_feed":               s.toolSnsFeed,
-		"sns_search":             s.toolSnsSearch,
-		"sns_notifications":      s.toolSnsNotifications,
-		"search":                 s.toolSearch,
-		"sql":                    s.toolSQL,
-		"transfers":              s.toolTransfers,
-		"red_packets":            s.toolRedPackets,
-		"favorites":              s.toolFavorites,
-		"chatroom_announcements": s.toolChatroomAnnouncements,
-		"forward_history":        s.toolForwardHistory,
-		"schema":                 s.toolSchema,
-		"cache_status":           s.toolCacheStatus,
-		"cache_refresh":          s.toolCacheRefresh,
-		"cache_rebuild":          s.toolCacheRebuild,
-		"unread":                 s.toolUnread,
-		"stats":                  s.toolStats,
-		"export_messages":        s.toolExportMessages,
-	}
-	fn, ok := handlers[p.Name]
-	if !ok {
-		return errResult("unknown tool: " + p.Name)
-	}
-	if err := validateToolArgs(p.Name, p.Arguments); err != nil {
-		return errResult(err.Error())
-	}
-	result, err := fn(p.Arguments)
-	if err != nil {
-		return errResult(err.Error())
-	}
-	b, _ := json.Marshal(result)
-	return toolResult{Content: []contentBlock{{Type: "text", Text: string(b)}}}
-}
-
-func errResult(msg string) toolResult {
-	return toolResult{IsError: true, Content: []contentBlock{{Type: "text", Text: msg}}}
 }
 
 // ──────────────────── tool handlers ────────────────────
@@ -838,19 +716,21 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePag
 		offset = getInt(args, "offset", 0)
 	}
 	meta := compactMap(map[string]any{
-		"chat":          getStr(args, "chat"),
-		"talker":        firstNonEmpty(rowString(firstRow(rows), "talker"), getStr(args, "talker")),
-		"display_name":  rowString(firstRow(rows), "talker_display_name"),
-		"limit":         limit,
-		"offset":        offset,
-		"order":         normalizeOrderArg(getStr(args, "order")),
-		"display_order": displayOrder,
-		"after":         getStr(args, "after"),
-		"before":        getStr(args, "before"),
-		"keyword":       getStr(args, "keyword"),
-		"type":          firstNonEmpty(getStr(args, "kind_name"), getStr(args, "type")),
-		"sender":        getStr(args, "sender"),
-		"returned":      returned,
+		"chat":           getStr(args, "chat"),
+		"talker":         firstNonEmpty(rowString(firstRow(rows), "talker"), getStr(args, "talker")),
+		"display_name":   rowString(firstRow(rows), "talker_display_name"),
+		"limit":          limit,
+		"offset":         offset,
+		"order":          normalizeOrderArg(getStr(args, "order")),
+		"display_order":  displayOrder,
+		"after":          getStr(args, "after"),
+		"before":         getStr(args, "before"),
+		"before_message": messageBoundaryQueryValue(args, "before"),
+		"after_message":  messageBoundaryQueryValue(args, "after"),
+		"keyword":        getStr(args, "keyword"),
+		"type":           firstNonEmpty(getStr(args, "kind_name"), getStr(args, "type")),
+		"sender":         getStr(args, "sender"),
+		"returned":       returned,
 	})
 	if meta["order"] == "" {
 		meta["order"] = "desc"
@@ -868,6 +748,9 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePag
 	if oldest, newest := messageTimeBounds(rows); oldest != "" || newest != "" {
 		meta["oldest_time"] = oldest
 		meta["newest_time"] = newest
+	}
+	if cursor := messageCursorMeta(rows); len(cursor) > 0 {
+		meta["cursor"] = cursor
 	}
 	_ = queryOrder
 	return meta
@@ -918,6 +801,36 @@ func messageTimeBounds(rows []wcdb.Row) (string, string) {
 func newestMessageTime(rows []wcdb.Row) string {
 	_, newest := messageTimeBounds(rows)
 	return newest
+}
+
+func messageCursorMeta(rows []wcdb.Row) map[string]any {
+	var oldest, newest wcdb.Row
+	for _, r := range rows {
+		if rowInt64(r, "local_id") == 0 {
+			continue
+		}
+		if oldest == nil || messageRowLess(r, oldest) {
+			oldest = r
+		}
+		if newest == nil || messageRowLess(newest, r) {
+			newest = r
+		}
+	}
+	return compactMap(map[string]any{
+		"oldest_local_id":     rowInt64(oldest, "local_id"),
+		"newest_local_id":     rowInt64(newest, "local_id"),
+		"next_before_message": rowInt64(oldest, "local_id"),
+		"next_after_message":  rowInt64(newest, "local_id"),
+	})
+}
+
+func messageRowLess(a, b wcdb.Row) bool {
+	at := rowInt64(a, "create_time")
+	bt := rowInt64(b, "create_time")
+	if at != bt {
+		return at < bt
+	}
+	return rowInt64(a, "local_id") < rowInt64(b, "local_id")
 }
 
 func formatUnixLocal(ts int64) string {
@@ -1016,7 +929,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 
 	var where []string
 	var args []any
-	if s := getStr(a, "after"); s != "" {
+	if s := firstNonEmpty(getStr(a, "after"), getStr(a, "since_time"), getStr(a, "since")); s != "" {
 		ts, err := parseTS(s)
 		if err != nil {
 			return nil, messagePageInfo{}, err
@@ -1031,6 +944,9 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		}
 		where = append(where, "create_time < ?")
 		args = append(args, ts)
+	}
+	if err := s.appendMessageBoundaryWhere(a, shards, tableName, &where, &args); err != nil {
+		return nil, messagePageInfo{}, err
 	}
 	if baseKind := getInt(a, "base_kind", 0); baseKind != 0 {
 		where = append(where, "(local_type & 4294967295) = ?")
@@ -2027,6 +1943,12 @@ func attachForwardItemMissingMediaWarnings(item map[string]any, kind string) {
 		if !filesHaveReadablePath(mapSliceAny(item["files"])) {
 			warning = "forward_file_not_resolved"
 		}
+	case "voice":
+		voice := mapAny(item["voice"])
+		transcript := mapAny(voice["transcript"])
+		if len(voice) == 0 || stringMapValue(transcript, "status") != "ok" {
+			warning = "forward_voice_not_resolved"
+		}
 	}
 	if warning != "" {
 		item["warnings"] = appendUniqueStrings(stringSliceAny(item["warnings"]), warning)
@@ -2122,7 +2044,15 @@ func forwardVideoRefs(it wxparse.ForwardItem, path []int, hints []map[string]any
 }
 
 func forwardVoicePayload(it wxparse.ForwardItem) map[string]any {
-	return nil
+	return compactMap(map[string]any{
+		"title":       firstNonEmpty(it.DataTitle, it.DataDesc),
+		"description": it.DataDesc,
+		"format":      it.DataFmt,
+		"readable":    false,
+		"transcript": map[string]any{
+			"status": "unavailable",
+		},
+	})
 }
 
 func forwardFilePayload(it wxparse.ForwardItem) map[string]any {
@@ -2130,6 +2060,7 @@ func forwardFilePayload(it wxparse.ForwardItem) map[string]any {
 		"name":      firstNonEmpty(it.DataTitle, it.DataDesc),
 		"file_ext":  it.DataFmt,
 		"file_size": it.DataSize,
+		"readable":  false,
 	})
 }
 
@@ -2486,15 +2417,20 @@ func agentVoiceRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
 }
 
 func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string) {
+	matched := false
+	var warnings []string
 	for _, h := range mapSliceAny(r["media_read_hints"]) {
 		if !agentHintMatchesReferenced(h, referenced) || !agentHintMatchesFamily(h, "voice") {
 			continue
 		}
+		matched = true
 		transcript := agentVoiceTranscriptPayload(mapAny(h["transcript"]))
 		if len(transcript) == 0 {
+			if rowString(wcdb.Row(h), "lookup_error") != "" {
+				warnings = appendUniqueStrings(warnings, "voice_media_lookup_failed")
+			}
 			continue
 		}
-		var warnings []string
 		switch stringMapValue(transcript, "status") {
 		case "ok":
 		case "no_speech":
@@ -2505,6 +2441,10 @@ func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string
 			warnings = appendUniqueStrings(warnings, "voice_transcription_unavailable")
 		}
 		return transcript, warnings
+	}
+	if matched {
+		warnings = appendUniqueStrings(warnings, "voice_transcription_unavailable")
+		return map[string]any{"status": "unavailable"}, warnings
 	}
 	return nil, nil
 }
@@ -3497,6 +3437,15 @@ func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths boo
 				"message_origin_source": rowInt64(r, "message_origin_source"),
 				"resources":             []map[string]any{},
 			}
+			item["id"] = compactMap(map[string]any{
+				"local_id":      item["local_id"],
+				"server_id_str": item["server_id_str"],
+				"talker":        item["talker"],
+			})
+			item["time"] = formatUnixLocal(createTime)
+			item["time_iso"] = cliFormatUnixISO(createTime)
+			item["sender"] = firstNonEmpty(rowString(r, "sender_display_name"), rowString(r, "sender_wxid"))
+			item["kind"] = kindName
 			if self != "" && rowString(r, "sender_wxid") != "" {
 				item["is_from_me"] = rowString(r, "sender_wxid") == self
 			}
@@ -3588,6 +3537,8 @@ func agentReadyMediaResourceOutput(items []map[string]any) {
 		for _, k := range []string{
 			"base_kind", "subtype", "message_origin_source", "message_packed_strings",
 			"media_local_paths", "media_local_path_uris", "media_read_hints", "resource_count",
+			"talker", "talker_display_name", "chat_type", "local_id", "server_id", "server_id_str",
+			"create_time_human", "sender_display_name", "kind_name",
 		} {
 			delete(item, k)
 		}
@@ -3599,6 +3550,9 @@ func agentReadyMediaResource(res map[string]any) map[string]any {
 	out := map[string]any{}
 	if len(paths) > 0 {
 		out["path"] = paths[0]
+		if typ := normalizedMediaResourceType(rowString(wcdb.Row(res), "resource_family")); typ != "" {
+			out["type"] = typ
+		}
 		for _, k := range []string{"size", "md5", "content_md5", "file_name", "file_names"} {
 			if v, ok := res[k]; ok {
 				out[k] = v
@@ -3609,6 +3563,15 @@ func agentReadyMediaResource(res map[string]any) map[string]any {
 		out["warnings"] = warnings
 	}
 	return compactMap(out)
+}
+
+func normalizedMediaResourceType(family string) string {
+	switch family {
+	case "image", "video", "file", "cover", "voice":
+		return family
+	default:
+		return ""
+	}
 }
 
 func agentReadyMediaResourcePaths(res map[string]any) []string {
@@ -3642,8 +3605,11 @@ func agentReadyMediaResourceWarnings(res map[string]any, readablePaths []string)
 	switch family {
 	case "image", "cover":
 		for _, d := range mapSliceAny(res["local_path_details"]) {
-			if rowString(wcdb.Row(d), "decode_status") == "needs_image_key" {
+			switch rowString(wcdb.Row(d), "decode_status") {
+			case "needs_image_key":
 				warnings = appendUniqueStrings(warnings, "image_decode_needs_image_key")
+			case "strict_read_only":
+				warnings = appendUniqueStrings(warnings, "strict_read_only_media_cache_disabled")
 			}
 		}
 		if len(localPaths) > 0 {
@@ -3925,7 +3891,11 @@ func (s *server) decodeLocalImageForAgent(path string, siblingPaths []string) ma
 	}
 	decodedPath, err := s.writeDecodedMediaCache(path, decoded, ext)
 	if err != nil {
-		out["decode_status"] = "decode_failed"
+		if strings.Contains(err.Error(), "strict_read_only") {
+			out["decode_status"] = "strict_read_only"
+		} else {
+			out["decode_status"] = "decode_failed"
+		}
 		out["decode_error"] = err.Error()
 		return out
 	}
@@ -4275,9 +4245,6 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
 	sum := sha256.Sum256(data)
 	base := safeCacheID(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
 	if base == "" {
@@ -4290,6 +4257,12 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 	dst := filepath.Join(dir, fmt.Sprintf("%s-%s.%s", base, hex.EncodeToString(sum[:8]), ext))
 	if st, err := os.Stat(dst); err == nil && !st.IsDir() && st.Size() == int64(len(data)) {
 		return dst, nil
+	}
+	if strictReadOnlyMode() {
+		return "", fmt.Errorf("strict_read_only: decoded media cache write is disabled")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
 	}
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
@@ -4668,6 +4641,13 @@ func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
 	cachePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".transcript.json"
 	if cached := readVoiceTranscriptCache(cachePath); voiceTranscriptCacheUsable(cached) {
 		return cached
+	}
+	if strictReadOnlyMode() {
+		return compactMap(map[string]any{
+			"status": "unavailable",
+			"engine": "disabled",
+			"reason": "strict_read_only",
+		})
 	}
 	asrPath, err := s.voiceAudioForASR(audioPath)
 	if err != nil {

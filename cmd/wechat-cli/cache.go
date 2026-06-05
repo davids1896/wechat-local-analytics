@@ -154,7 +154,7 @@ func (s *server) openCacheIndexWithWarningsMode(writable bool) (*wcdb.DB, []stri
 }
 
 func (s *server) ensureCacheFresh(paths cachePaths) error {
-	if envBoolAny("WECHAT_CLI_DISABLE_AUTO_REFRESH", "WX_MCP_DISABLE_AUTO_REFRESH") {
+	if strictReadOnlyMode() || envBoolAny("WECHAT_CLI_DISABLE_AUTO_REFRESH", "WX_MCP_DISABLE_AUTO_REFRESH") {
 		return nil
 	}
 	fresh, reason, err := s.cacheFreshness(s.cfg, paths)
@@ -218,6 +218,9 @@ func (s *server) ensureCacheFresh(paths cachePaths) error {
 }
 
 func (s *server) maybeSpawnMetadataRefresh(reason string) {
+	if strictReadOnlyMode() {
+		return
+	}
 	if cacheRefreshWouldLikelyRepeat(reason) {
 		return
 	}
@@ -461,6 +464,9 @@ func (s *server) toolCacheStatus(a map[string]any) (any, error) {
 }
 
 func (s *server) toolCacheRefresh(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only: cache refresh is disabled")
+	}
 	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
 	if err != nil {
 		return nil, err
@@ -529,6 +535,9 @@ func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
 }
 
 func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only: cache rebuild is disabled")
+	}
 	unlock, acquired, lockPath, err := acquireCacheRefreshLock()
 	if err != nil {
 		return nil, err
@@ -1238,6 +1247,9 @@ func (s *server) toolStats(a map[string]any) (any, error) {
 }
 
 func (s *server) toolExportMessages(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only: export_messages writes a local file; rerun without strict read-only for explicit export")
+	}
 	path := getStr(a, "path")
 	if path == "" {
 		return nil, fmt.Errorf("path is required")
