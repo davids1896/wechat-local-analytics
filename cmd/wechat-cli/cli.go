@@ -574,11 +574,14 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 	createTime := int64MapValue(row, "create_time")
 	text := firstNonEmpty(stringMapValue(row, "content_summary"), stringMapValue(row, "content"))
 	match := stringMapValue(row, "content")
+	originalTextChars := maxInt(len([]rune(text)), len([]rune(match)))
 	maxChars := getInt(args, "max_text_chars", 0)
 	if getBoolDefault(args, "snippet_only", false) && maxChars == 0 {
 		maxChars = 180
 	}
+	textTruncated := false
 	if maxChars > 0 {
+		textTruncated = len([]rune(text)) > maxChars || len([]rune(match)) > maxChars
 		text = truncateRunes(text, maxChars)
 		match = truncateRunes(match, maxChars)
 	}
@@ -605,6 +608,12 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 		delete(out, "text")
 		delete(out, "match")
 	}
+	if maxChars > 0 || !getBoolDefault(args, "include_text", true) {
+		out["original_text_chars"] = originalTextChars
+	}
+	if maxChars > 0 {
+		out["text_truncated"] = textTruncated
+	}
 	return out
 }
 
@@ -617,6 +626,13 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(r[:max])
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func cliFormatUnixISO(ts int64) string {
@@ -673,6 +689,7 @@ func cliResultQueryMeta(tool, command string, args map[string]any, rows []map[st
 		"keyword":     getStr(args, "keyword"),
 		"type":        firstNonEmpty(getStr(args, "type"), getStr(args, "kind_name"), getStr(args, "type_filter"), getStr(args, "filter")),
 		"sender":      getStr(args, "sender"),
+		"from_me":     getBoolDefault(args, "from_me", false),
 		"after":       getStr(args, "after"),
 		"before":      getStr(args, "before"),
 		"limit":       limit,

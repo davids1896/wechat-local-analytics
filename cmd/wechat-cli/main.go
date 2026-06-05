@@ -730,6 +730,7 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePag
 		"keyword":        getStr(args, "keyword"),
 		"type":           firstNonEmpty(getStr(args, "kind_name"), getStr(args, "type")),
 		"sender":         getStr(args, "sender"),
+		"from_me":        getBoolDefault(args, "from_me", false),
 		"returned":       returned,
 	})
 	if meta["order"] == "" {
@@ -7257,6 +7258,12 @@ func validateToolArgs(name string, args map[string]any) error {
 			if n < 0 {
 				return fmt.Errorf("invalid argument %q for tool %s: expected non-negative integer, got %d", k, name, n)
 			}
+			if min, ok := integerSchemaBound(p, "minimum"); ok && n < min {
+				return fmt.Errorf("invalid argument %q for tool %s: minimum is %d, got %d", k, name, min, n)
+			}
+			if max, ok := integerSchemaBound(p, "maximum"); ok && n > max {
+				return fmt.Errorf("invalid argument %q for tool %s: maximum is %d, got %d", k, name, max, n)
+			}
 			if max, ok := maxIntegerArg(name, k); ok && n > max {
 				return fmt.Errorf("invalid argument %q for tool %s: maximum is %d, got %d", k, name, max, n)
 			}
@@ -7267,6 +7274,13 @@ func validateToolArgs(name string, args map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func integerSchemaBound(prop map[string]any, key string) (int64, bool) {
+	if prop == nil {
+		return 0, false
+	}
+	return integerArgValue(prop[key])
 }
 
 func validateStringEnum(tool, key, value string, prop map[string]any) error {

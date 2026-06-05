@@ -52,6 +52,7 @@ func errInvalidReadOSMode(mode string) error {
 }
 
 func (s *server) readOSStatus(includeDebug bool) map[string]any {
+	capabilities := readOSCapabilities(false, false, false)
 	status := map[string]any{
 		"platform": map[string]any{
 			"os":   runtime.GOOS,
@@ -60,9 +61,13 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		"mode": map[string]any{
 			"strict_read_only": strictReadOnlyMode(),
 		},
-		"checked_at": time.Now().Format(time.RFC3339),
+		"capabilities": capabilities,
+		"checked_at":   time.Now().Format(time.RFC3339),
 	}
 	readiness := "ready"
+	dbReady := false
+	cacheIndexExists := false
+	wcdbAvailable := false
 	var warnings []string
 	blockedBy := ""
 	nextAction := ""
@@ -98,10 +103,13 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 			setBlocked("db_root_missing", "Configure WeChat DB root through first key setup.", readOSBootstrapCommand(), appName+" status --pretty")
 		} else if !cfg.Ready() {
 			setBlocked("key_config_missing", "Prepare local WeChat DB keys, then rerun the read command.", readOSBootstrapCommand(), appName+" status --pretty")
+		} else {
+			dbReady = true
 		}
 		if paths, err := cachePathsFor(cfg); err == nil {
+			cacheIndexExists = fileExists(paths.IndexPath)
 			cache := map[string]any{
-				"index_exists": fileExists(paths.IndexPath),
+				"index_exists": cacheIndexExists,
 			}
 			if includeDebug {
 				cache["root_dir"] = paths.RootDir
@@ -123,7 +131,11 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 								}
 							} else {
 								cache["blocked_reason"] = metadataStatusReason(reason)
-								setBlocked("metadata_cache_blocked", "Refresh metadata cache, or pass raw talker/wxid to skip display-name resolution.", appName+" cache refresh", appName+" status --pretty")
+								cache["degraded"] = true
+								warnings = appendUniqueStrings(warnings, "metadata_cache_degraded")
+								if readiness == "ready" {
+									readiness = "degraded"
+								}
 							}
 						}
 					}
@@ -136,6 +148,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		status["config_path"] = cfgPath
 	}
 	if wcdbPath, err := findWCDB(); err == nil {
+		wcdbAvailable = true
 		status["wcdb"] = compactMap(map[string]any{
 			"available": true,
 			"path":      debugOnlyString(wcdbPath, includeDebug),
@@ -147,6 +160,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		}
 		setBlocked("wcdb_missing", "Use an installed release or point WECHAT_CLI_WCDB_DYLIB/WECHAT_CLI_WCDB_LIB at the bundled WCDB library.", appName+" status --pretty")
 	}
+	status["capabilities"] = readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists)
 	status["readiness"] = readiness
 	if len(warnings) > 0 {
 		status["warnings"] = warnings
@@ -157,6 +171,19 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		status["suggested_commands"] = suggestedCommands
 	}
 	return status
+}
+
+func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[string]bool {
+	liveRead := dbReady && wcdbAvailable
+	return map[string]bool{
+		"search":          liveRead,
+		"sessions":        liveRead,
+		"timeline":        liveRead,
+		"context":         liveRead,
+		"tail":            liveRead,
+		"media":           liveRead,
+		"name_resolution": cacheIndexExists,
+	}
 }
 
 func readOSBootstrapCommand() string {

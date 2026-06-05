@@ -6,6 +6,16 @@ type props = map[string]any
 func strProp(desc string) any  { return map[string]any{"type": "string", "description": desc} }
 func intProp(desc string) any  { return map[string]any{"type": "integer", "description": desc} }
 func boolProp(desc string) any { return map[string]any{"type": "boolean", "description": desc} }
+func intPropBounds(desc string, minimum, maximum int64) any {
+	p := map[string]any{"type": "integer", "description": desc}
+	if minimum >= 0 {
+		p["minimum"] = minimum
+	}
+	if maximum > 0 {
+		p["maximum"] = maximum
+	}
+	return p
+}
 func enumStrProp(desc string, values ...string) any {
 	return map[string]any{"type": "string", "description": desc, "enum": values}
 }
@@ -526,12 +536,12 @@ var toolDefs = []toolDef{
 			"base_kind":      intProp("可选: base_kind raw int"),
 			"sender":         strProp("可选: sender wxid/昵称; 可传 me/self 表示自己"),
 			"from_me":        boolProp("仅返回自己发出的消息; 等价 sender=me"),
-			"offset":         intProp("跳过命中条数 (默认 0)"),
-			"max_text_chars": intProp("裁剪 text/match 字符数; 适合统计任务降低 token"),
+			"offset":         intPropBounds("跳过命中条数 (默认 0)", 0, 1000000),
+			"max_text_chars": intPropBounds("裁剪 text/match 字符数; 适合统计任务降低 token", 1, 2000),
 			"snippet_only":   boolProp("只返回短片段; 等价 max_text_chars 默认 180"),
 			"include_text":   boolProp("是否返回 text/match 字段 (默认 true; false 仅返回元数据)"),
 			"search_mode":    enumStrProp("兼容参数: fts (默认) / like / auto; 当前都走微信 live FTS", "fts", "like", "auto"),
-			"limit":          intProp("返回条数 (默认 20)"),
+			"limit":          intPropBounds("返回条数 (默认 20, 最大 1000)", 1, 1000),
 		}, []string{"keyword"}),
 	},
 	{

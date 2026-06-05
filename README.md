@@ -226,7 +226,7 @@ WECHAT_CLI_BIN=./wechat-cli WECHAT_READ_TEST_CHAT="$CHAT" WECHAT_READ_TEST_KEYWO
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.14
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.15
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。

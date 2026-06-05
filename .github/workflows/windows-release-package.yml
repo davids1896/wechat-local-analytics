@@ -6,7 +6,7 @@ on:
       version:
         description: "wechat-cli release version without leading v"
         required: true
-        default: "1.6.14"
+        default: "1.6.15"
       wcdb_version:
         description: "Tencent/WCDB release version without leading v"
         required: true

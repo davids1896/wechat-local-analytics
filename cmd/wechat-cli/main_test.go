@@ -346,6 +346,9 @@ func TestCLISearchMessageRowCanTrimText(t *testing.T) {
 	if got["text"] != "不是AB" || got["match"] != "不是AB" {
 		t.Fatalf("trimmed row = %#v", got)
 	}
+	if got["text_truncated"] != true || got["original_text_chars"] == nil {
+		t.Fatalf("truncation metadata = %#v", got)
+	}
 	got = cliSearchMessageRow(row, map[string]any{"include_text": false})
 	if _, ok := got["text"]; ok {
 		t.Fatalf("include_text=false leaked text: %#v", got)
@@ -353,14 +356,63 @@ func TestCLISearchMessageRowCanTrimText(t *testing.T) {
 	if _, ok := got["match"]; ok {
 		t.Fatalf("include_text=false leaked match: %#v", got)
 	}
+	if got["original_text_chars"] == nil {
+		t.Fatalf("include_text=false should retain original_text_chars: %#v", got)
+	}
 }
 
 func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
 	if err := validateToolArgs("search", map[string]any{"keyword": "x", "limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
 		t.Fatalf("search limit validation error = %v", err)
 	}
+	if err := validateToolArgs("search", map[string]any{"keyword": "x", "limit": int64(0)}); err == nil || !strings.Contains(err.Error(), "minimum is 1") {
+		t.Fatalf("search limit minimum validation error = %v", err)
+	}
 	if err := validateToolArgs("search", map[string]any{"keyword": "x", "max_text_chars": int64(2001)}); err == nil || !strings.Contains(err.Error(), "maximum is 2000") {
 		t.Fatalf("max_text_chars validation error = %v", err)
+	}
+}
+
+func TestSearchQueryMetaEchoesFromMe(t *testing.T) {
+	meta := cliResultQueryMeta("search", "search", map[string]any{
+		"keyword": "不是",
+		"from_me": true,
+		"limit":   int64(2),
+	}, []map[string]any{{"local_id": int64(1)}})
+	if meta["from_me"] != true {
+		t.Fatalf("query meta did not echo from_me: %#v", meta)
+	}
+}
+
+func TestSearchSchemaExposesLimitBounds(t *testing.T) {
+	doc, ok := cliHelpDocumentWithProfile("search", "").(map[string]any)
+	if !ok {
+		t.Fatalf("search doc type = %T", cliHelpDocumentWithProfile("search", ""))
+	}
+	tool, ok := doc["tool"].(toolDef)
+	if !ok {
+		t.Fatalf("search tool = %#v", doc["tool"])
+	}
+	props := toolInputProperties(tool)
+	limit, _ := props["limit"].(map[string]any)
+	if limit["minimum"] != int64(1) || limit["maximum"] != int64(1000) {
+		t.Fatalf("search limit schema = %#v", limit)
+	}
+	maxText, _ := props["max_text_chars"].(map[string]any)
+	if maxText["minimum"] != int64(1) || maxText["maximum"] != int64(2000) {
+		t.Fatalf("max_text_chars schema = %#v", maxText)
+	}
+}
+
+func TestReadOSCapabilitiesSeparateLiveReadFromNameResolution(t *testing.T) {
+	caps := readOSCapabilities(true, true, false)
+	for _, key := range []string{"search", "sessions", "timeline", "context", "tail", "media"} {
+		if !caps[key] {
+			t.Fatalf("capability %s = false in live-read ready caps: %#v", key, caps)
+		}
+	}
+	if caps["name_resolution"] {
+		t.Fatalf("name_resolution should stay false without metadata index: %#v", caps)
 	}
 }
 

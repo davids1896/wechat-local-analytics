@@ -69,6 +69,7 @@ func (s *server) readMessageEvents(a map[string]any) (any, error) {
 		"query": compactMap(map[string]any{
 			"mode":     "messages",
 			"chat":     firstNonEmpty(getStr(a, "chat"), getStr(a, "talker")),
+			"from_me":  getBoolDefault(a, "from_me", false),
 			"limit":    getInt(args, "limit", 50),
 			"cursor":   getStr(a, "cursor"),
 			"returned": len(events),
