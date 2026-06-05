@@ -23,8 +23,8 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 	if contextLimit > 20 {
 		contextLimit = 20
 	}
-	beforeCount := contextCountArg(a, "before_count", "before_messages", 5)
-	afterCount := contextCountArg(a, "after_count", "after_messages", 5)
+	beforeCount := searchContextCountArg(a, "before_count", "before_messages", 5)
+	afterCount := searchContextCountArg(a, "after_count", "after_messages", 5)
 	includeMedia := getBoolDefault(a, "include_media_paths", true)
 	includeDebug := includeDebugOutput(a)
 
@@ -68,26 +68,48 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 		}
 		hits = append(hits, hit)
 	}
+	query := compactMap(map[string]any{
+		"keyword":           getStr(a, "keyword"),
+		"chat":              firstNonEmpty(getStr(a, "chat"), getStr(a, "talker")),
+		"sender":            getStr(a, "sender"),
+		"from_me":           queryFromMeArg(a),
+		"type":              firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")),
+		"after":             getStr(a, "after"),
+		"before":            getStr(a, "before"),
+		"limit":             searchLimit,
+		"context_limit":     contextLimit,
+		"before_count":      beforeCount,
+		"after_count":       afterCount,
+		"returned":          len(hits),
+		"contexts_returned": contextsReturned,
+	})
+	if _, ok := a["context_limit"]; ok {
+		query["context_limit"] = contextLimit
+		query["contexts_returned"] = contextsReturned
+	}
 	return map[string]any{
-		"query": compactMap(map[string]any{
-			"keyword":           getStr(a, "keyword"),
-			"chat":              firstNonEmpty(getStr(a, "chat"), getStr(a, "talker")),
-			"sender":            getStr(a, "sender"),
-			"from_me":           queryFromMeArg(a),
-			"type":              firstNonEmpty(getStr(a, "kind_name"), getStr(a, "type")),
-			"after":             getStr(a, "after"),
-			"before":            getStr(a, "before"),
-			"limit":             searchLimit,
-			"context_limit":     contextLimit,
-			"before_count":      beforeCount,
-			"after_count":       afterCount,
-			"returned":          len(hits),
-			"contexts_returned": contextsReturned,
-		}),
+		"query": query,
 		"freshness": map[string]any{
 			"message_source":      "live_message_fts_plus_live_message_db_context",
 			"metadata_cache_role": "chat/sender display names only",
 		},
 		"hits": hits,
 	}, nil
+}
+
+func searchContextCountArg(a map[string]any, primary, alias string, def int) int {
+	n := getInt(a, primary, -1)
+	if n < 0 {
+		n = getInt(a, alias, -1)
+	}
+	if n < 0 {
+		n = def
+	}
+	if n < 0 {
+		n = 0
+	}
+	if n > 500 {
+		return 500
+	}
+	return n
 }

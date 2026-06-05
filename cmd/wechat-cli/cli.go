@@ -66,8 +66,8 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "coverage", Tool: "read_os", Usage: appName + " coverage", Description: "Show the WeChat Read OS coverage matrix.", Examples: []string{appName + " coverage --pretty"}},
 	{Command: "workflows", Aliases: []string{"playbook", "recipes"}, Tool: "read_os", Usage: appName + " workflows", Description: "Show agent workflows and command recipes.", Examples: []string{appName + " workflows --pretty"}},
 	{Command: "update", Aliases: []string{"upgrade", "self-update", "self_update"}, Usage: appName + " update [--dry-run] [--tag vX.Y.Z]", Description: "Update an installed release to the latest GitHub release.", Examples: []string{appName + " update", appName + " update --dry-run"}},
-	{Command: "call", Usage: appName + " call <tool> [--key value ...]", Description: "Call a tool with key/value CLI arguments.", Examples: []string{appName + ` call chat_timeline --chat "$CHAT" --limit 20`}},
-	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <tool> '<json args>'", Description: "Call a tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json messages '{"chat":"$CHAT","limit":20,"view":"agent"}'`}},
+	{Command: "call", Usage: appName + " call <command-or-tool> [--key value ...]", Description: "Call a command/tool with key/value CLI arguments.", Examples: []string{appName + ` call timeline --chat "$CHAT" --limit 20`}},
+	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <command-or-tool> '<json args>'", Description: "Call a command/tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json timeline '{"chat":"$CHAT","limit":20}'`, appName + ` call-json search-context '{"keyword":"$KEYWORD","limit":5}'`}},
 	{Command: "tool-schema", Aliases: []string{"describe", "describe-tool", "tool_schema"}, Usage: appName + " tool-schema <command-or-tool>", Description: "Return one command/tool schema.", Examples: []string{appName + " tool-schema timeline"}},
 	{Command: "cache", Usage: appName + " cache <status|refresh|rebuild>", Description: "Metadata cache subcommands.", Examples: []string{appName + " cache status"}},
 	{Command: "cache status", Tool: "cache_status", Usage: appName + " cache status", Examples: []string{appName + " cache status"}},
@@ -332,14 +332,22 @@ func runToolsCLI(args []string, opts cliOptions) {
 
 func runGenericToolCLI(args []string, opts cliOptions) {
 	if len(args) == 0 {
-		exitCLIError(opts, 2, "missing_tool", "usage: "+appName+" call <tool> [--key value ...]", "", "call")
+		exitCLIError(opts, 2, "missing_tool", "usage: "+appName+" call <command-or-tool> [--key value ...]", "", "call")
 	}
-	runToolCLI(args[0], parseKVFlags(args[1:]), opts, "call")
+	name, ok := callableToolNameForTarget(args[0])
+	if !ok {
+		exitCLIError(opts, 2, "unknown_tool", fmt.Sprintf("unknown command or tool %q", args[0]), args[0], "call")
+	}
+	runToolCLI(name, parseKVFlags(args[1:]), opts, "call")
 }
 
 func runToolJSONCLI(args []string, opts cliOptions) {
 	if len(args) == 0 {
-		exitCLIError(opts, 2, "missing_tool", "usage: "+appName+" call-json <tool> '<json args>'", "", "call-json")
+		exitCLIError(opts, 2, "missing_tool", "usage: "+appName+" call-json <command-or-tool> '<json args>'", "", "call-json")
+	}
+	name, ok := callableToolNameForTarget(args[0])
+	if !ok {
+		exitCLIError(opts, 2, "unknown_tool", fmt.Sprintf("unknown command or tool %q", args[0]), args[0], "call-json")
 	}
 	raw := ""
 	if len(args) > 1 {
@@ -347,17 +355,25 @@ func runToolJSONCLI(args []string, opts cliOptions) {
 	} else {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			exitCLIError(opts, 1, "stdin_read_error", err.Error(), args[0], "call-json")
+			exitCLIError(opts, 1, "stdin_read_error", err.Error(), name, "call-json")
 		}
 		raw = string(data)
 	}
 	flags := map[string]any{}
 	if strings.TrimSpace(raw) != "" {
 		if err := json.Unmarshal([]byte(raw), &flags); err != nil {
-			exitCLIError(opts, 1, "invalid_json", "invalid json args: "+err.Error(), args[0], "call-json")
+			exitCLIError(opts, 1, "invalid_json", "invalid json args: "+err.Error(), name, "call-json")
 		}
 	}
-	runToolCLI(args[0], flags, opts, "call-json")
+	runToolCLI(name, flags, opts, "call-json")
+}
+
+func callableToolNameForTarget(target string) (string, bool) {
+	_, tool, ok := cliHelpForTarget(target)
+	if !ok || tool.Name == "" {
+		return "", false
+	}
+	return tool.Name, true
 }
 
 func runToolSchemaCLI(args []string, opts cliOptions) {

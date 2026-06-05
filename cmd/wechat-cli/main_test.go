@@ -221,6 +221,25 @@ func TestCLIHelpDocumentForCommand(t *testing.T) {
 	}
 }
 
+func TestCallableToolNameAcceptsCommandAliases(t *testing.T) {
+	cases := map[string]string{
+		"search-context":      "search_with_context",
+		"search_with_context": "search_with_context",
+		"tail":                "read_events",
+		"watch":               "read_events",
+		"read_events":         "read_events",
+	}
+	for target, want := range cases {
+		got, ok := callableToolNameForTarget(target)
+		if !ok || got != want {
+			t.Fatalf("callableToolNameForTarget(%q) = %q/%v, want %q/true", target, got, ok, want)
+		}
+	}
+	if got, ok := callableToolNameForTarget("tools"); ok || got != "" {
+		t.Fatalf("non-tool command resolved as callable: %q/%v", got, ok)
+	}
+}
+
 func TestRootHelpCommandsExposeStableNameField(t *testing.T) {
 	out := captureStdout(t, func() {
 		runCLIHelp("", cliOptions{})
@@ -391,6 +410,15 @@ func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
 	if err := validateToolArgs("search_with_context", map[string]any{"keyword": "x", "max_text_chars": int64(2001)}); err == nil || !strings.Contains(err.Error(), "maximum is 2000") {
 		t.Fatalf("search_with_context max_text_chars validation error = %v", err)
 	}
+	if err := validateToolArgs("search_with_context", map[string]any{"keyword": "x", "limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
+		t.Fatalf("search_with_context limit validation error = %v", err)
+	}
+	if err := validateToolArgs("search_with_context", map[string]any{"keyword": "x", "context_limit": int64(21)}); err == nil || !strings.Contains(err.Error(), "maximum is 20") {
+		t.Fatalf("search_with_context context_limit validation error = %v", err)
+	}
+	if err := validateToolArgs("search_with_context", map[string]any{"keyword": "x", "before_count": int64(501)}); err == nil || !strings.Contains(err.Error(), "maximum is 500") {
+		t.Fatalf("search_with_context before_count validation error = %v", err)
+	}
 	if err := validateToolArgs("read_events", map[string]any{"limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
 		t.Fatalf("read_events limit validation error = %v", err)
 	}
@@ -446,9 +474,21 @@ func TestSearchSchemasExposeLimitBounds(t *testing.T) {
 		t.Fatalf("search-context tool = %#v", doc["tool"])
 	}
 	props = toolInputProperties(tool)
+	limit, _ = props["limit"].(map[string]any)
+	if limit["minimum"] != int64(1) || limit["maximum"] != int64(1000) {
+		t.Fatalf("search-context limit schema = %#v", limit)
+	}
+	contextLimit, _ := props["context_limit"].(map[string]any)
+	if contextLimit["minimum"] != int64(0) || contextLimit["maximum"] != int64(20) {
+		t.Fatalf("search-context context_limit schema = %#v", contextLimit)
+	}
 	maxText, _ = props["max_text_chars"].(map[string]any)
 	if maxText["minimum"] != int64(1) || maxText["maximum"] != int64(2000) {
 		t.Fatalf("search-context max_text_chars schema = %#v", maxText)
+	}
+	beforeCount, _ := props["before_count"].(map[string]any)
+	if beforeCount["minimum"] != int64(0) || beforeCount["maximum"] != int64(500) {
+		t.Fatalf("search-context before_count schema = %#v", beforeCount)
 	}
 	if _, ok := props["include_text"]; !ok {
 		t.Fatalf("search-context schema missing include_text: %#v", props)
@@ -702,6 +742,17 @@ func TestContextCountArgCapsWindow(t *testing.T) {
 	got := contextCountArg(map[string]any{"before_count": int64(999)}, "before_count", "before_messages", 20)
 	if got != 500 {
 		t.Fatalf("contextCountArg = %d, want 500", got)
+	}
+}
+
+func TestSearchContextCountArgDoesNotInheritSearchLimit(t *testing.T) {
+	got := searchContextCountArg(map[string]any{"limit": int64(1)}, "before_count", "before_messages", 5)
+	if got != 5 {
+		t.Fatalf("searchContextCountArg inherited limit: got %d, want 5", got)
+	}
+	got = searchContextCountArg(map[string]any{"before_messages": int64(501)}, "before_count", "before_messages", 5)
+	if got != 500 {
+		t.Fatalf("searchContextCountArg cap = %d, want 500", got)
 	}
 }
 

@@ -548,7 +548,7 @@ var toolDefs = []toolDef{
 		Name: "search_with_context",
 		Description: "跨会话关键词搜索并自动展开每个命中附近的上下文. 这是 agent 调查问题的高层入口: 先用微信 live FTS 找命中, 再用 live message DB 按 local_id 展开 before/anchor/after. " +
 			"返回 query/freshness/hits; hits[].message 是低噪声搜索命中, hits[].context 是 message_context 同形输出. " +
-			"limit 控制搜索命中数; context_limit 控制前多少个命中展开上下文 (默认 min(limit,5), 最大 20); before_count/after_count 默认 5.",
+			"limit 控制搜索命中数 (默认 20, 最大 1000); context_limit 控制前多少个命中展开上下文 (默认 min(limit,5), 最大 20); before_count/after_count 默认 5, 最大 500.",
 		InputSchema: jsonSchema(props{
 			"keyword":             strProp("搜索关键词"),
 			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom"),
@@ -564,12 +564,12 @@ var toolDefs = []toolDef{
 			"snippet_only":        boolProp("命中和上下文只返回短片段; 等价 max_text_chars 默认 180"),
 			"include_text":        boolProp("是否返回命中和上下文 text/match 字段 (默认 true; false 仅返回元数据)"),
 			"search_mode":         enumStrProp("兼容参数: fts (默认) / like / auto; 当前都走微信 live FTS", "fts", "like", "auto"),
-			"limit":               intProp("搜索命中条数 (默认 20)"),
-			"context_limit":       intProp("展开上下文的命中条数 (默认 min(limit,5), 最大 20)"),
-			"before_count":        intProp("每个命中之前返回多少条 (默认 5, 最大 500)"),
-			"after_count":         intProp("每个命中之后返回多少条 (默认 5, 最大 500)"),
-			"before_messages":     intProp("before_count 的别名"),
-			"after_messages":      intProp("after_count 的别名"),
+			"limit":               intPropBounds("搜索命中条数 (默认 20, 最大 1000)", 1, 1000),
+			"context_limit":       intPropBounds("展开上下文的命中条数 (默认 min(limit,5), 最大 20; 0 表示只返回命中不展开)", 0, 20),
+			"before_count":        intPropBounds("每个命中之前返回多少条 (默认 5, 最大 500)", 0, 500),
+			"after_count":         intPropBounds("每个命中之后返回多少条 (默认 5, 最大 500)", 0, 500),
+			"before_messages":     intPropBounds("before_count 的别名", 0, 500),
+			"after_messages":      intPropBounds("after_count 的别名", 0, 500),
 			"include_media_paths": boolProp("是否补齐上下文里的图片/视频/文件路径 (默认 true)"),
 			"include_debug":       boolProp("是否附带 debug 节点 (默认 false)"),
 			"debug":               boolProp("include_debug 的别名"),
