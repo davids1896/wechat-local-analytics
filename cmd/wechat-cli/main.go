@@ -40,11 +40,13 @@ import (
 )
 
 type toolDef struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ReadOnly    bool   `json:"read_only"`
-	LocalWrite  bool   `json:"local_write"`
-	InputSchema any    `json:"inputSchema"`
+	Name                   string `json:"name"`
+	Description            string `json:"description"`
+	ReadOnly               bool   `json:"read_only"`
+	LocalWrite             bool   `json:"local_write"`
+	LocalWriteMode         string `json:"local_write_mode"`
+	StrictReadOnlyBehavior string `json:"strict_read_only_behavior"`
+	InputSchema            any    `json:"inputSchema"`
 }
 
 // ──────────────────── server state ────────────────────

@@ -520,16 +520,16 @@ func TestTailSchemaExposesLimitBounds(t *testing.T) {
 
 func TestToolSchemaExposesMutability(t *testing.T) {
 	timeline := toolDefByName("chat_timeline")
-	if !timeline.ReadOnly || !timeline.LocalWrite {
-		t.Fatalf("chat_timeline mutability = read_only:%v local_write:%v", timeline.ReadOnly, timeline.LocalWrite)
+	if !timeline.ReadOnly || !timeline.LocalWrite || timeline.LocalWriteMode != "possible" || timeline.StrictReadOnlyBehavior != "allowed_without_writes" {
+		t.Fatalf("chat_timeline mutability = %#v", timeline)
 	}
 	search := toolDefByName("search")
-	if !search.ReadOnly || search.LocalWrite {
-		t.Fatalf("search mutability = read_only:%v local_write:%v", search.ReadOnly, search.LocalWrite)
+	if !search.ReadOnly || search.LocalWrite || search.LocalWriteMode != "none" || search.StrictReadOnlyBehavior != "same" {
+		t.Fatalf("search mutability = %#v", search)
 	}
 	export := toolDefByName("export_messages")
-	if !export.ReadOnly || !export.LocalWrite {
-		t.Fatalf("export_messages mutability = read_only:%v local_write:%v", export.ReadOnly, export.LocalWrite)
+	if !export.ReadOnly || !export.LocalWrite || export.LocalWriteMode != "required" || export.StrictReadOnlyBehavior != "blocked" {
+		t.Fatalf("export_messages mutability = %#v", export)
 	}
 }
 

@@ -58,11 +58,13 @@ func listedToolDefsForProfile(profile string) ([]toolDef, bool) {
 func displayToolDef(td toolDef) toolDef {
 	td = annotateToolDef(td)
 	out := toolDef{
-		Name:        td.Name,
-		Description: displayToolDescription(td),
-		ReadOnly:    td.ReadOnly,
-		LocalWrite:  td.LocalWrite,
-		InputSchema: cloneSchemaValue(td.InputSchema),
+		Name:                   td.Name,
+		Description:            displayToolDescription(td),
+		ReadOnly:               td.ReadOnly,
+		LocalWrite:             td.LocalWrite,
+		LocalWriteMode:         td.LocalWriteMode,
+		StrictReadOnlyBehavior: td.StrictReadOnlyBehavior,
+		InputSchema:            cloneSchemaValue(td.InputSchema),
 	}
 	hideInputProperties(out.InputSchema, hiddenDisplayProps(td.Name))
 	return out
@@ -70,7 +72,9 @@ func displayToolDef(td toolDef) toolDef {
 
 func annotateToolDef(td toolDef) toolDef {
 	td.ReadOnly = toolWechatReadOnly(td.Name)
-	td.LocalWrite = toolMayWriteLocalFiles(td.Name)
+	td.LocalWriteMode = toolLocalWriteMode(td.Name)
+	td.LocalWrite = td.LocalWriteMode != "none"
+	td.StrictReadOnlyBehavior = toolStrictReadOnlyBehavior(td.Name)
 	return td
 }
 
@@ -78,14 +82,25 @@ func toolWechatReadOnly(name string) bool {
 	return name != ""
 }
 
-func toolMayWriteLocalFiles(name string) bool {
+func toolLocalWriteMode(name string) string {
 	switch name {
 	case "cache_refresh", "cache_rebuild", "export_messages":
-		return true
+		return "required"
 	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history":
-		return true
+		return "possible"
 	default:
-		return false
+		return "none"
+	}
+}
+
+func toolStrictReadOnlyBehavior(name string) string {
+	switch toolLocalWriteMode(name) {
+	case "required":
+		return "blocked"
+	case "possible":
+		return "allowed_without_writes"
+	default:
+		return "same"
 	}
 }
 
