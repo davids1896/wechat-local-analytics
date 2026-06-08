@@ -25,6 +25,12 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 	}
 	beforeCount := searchContextCountArg(a, "before_count", "before_messages", 5)
 	afterCount := searchContextCountArg(a, "after_count", "after_messages", 5)
+	queryBeforeCount := beforeCount
+	queryAfterCount := afterCount
+	if contextLimit == 0 {
+		queryBeforeCount = 0
+		queryAfterCount = 0
+	}
 	includeMedia := getBoolDefault(a, "include_media_paths", true)
 	includeDebug := includeDebugOutput(a)
 
@@ -78,8 +84,8 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 		"before":            getStr(a, "before"),
 		"limit":             searchLimit,
 		"context_limit":     contextLimit,
-		"before_count":      beforeCount,
-		"after_count":       afterCount,
+		"before_count":      queryBeforeCount,
+		"after_count":       queryAfterCount,
 		"returned":          len(hits),
 		"contexts_returned": contextsReturned,
 	})

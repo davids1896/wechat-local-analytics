@@ -198,7 +198,8 @@ does not install a launchd watcher by default for the same reason.
 ## Agent Defaults
 
 - Use `wechat-cli --help`, `wechat-cli tools`, `wechat-cli tools --profile all`,
-  `wechat-cli call <tool> --key value`, and `wechat-cli call-json <tool> '{...}'`
+  `wechat-cli call <command-or-tool> --key value`, and
+  `wechat-cli call-json <command-or-tool> '{...}'`
   as the stable interface. `tools` defaults to the high-signal assistant
   profile with slim canonical schemas; `--profile all` includes compatibility
   aliases, maintenance, and debug tools. `tool-schema <command>` is slim by

@@ -83,8 +83,8 @@ wechat-cli timeline --help
 wechat-cli tool-schema chat_timeline
 wechat-cli tools
 wechat-cli tools --profile all
-wechat-cli call chat_timeline --chat "$CHAT" --limit 20
-wechat-cli call-json messages '{"chat":"$CHAT","limit":50,"view":"agent"}'
+wechat-cli call timeline --chat "$CHAT" --limit 20
+wechat-cli call-json history '{"chat":"$CHAT","limit":50,"view":"agent"}'
 printf '{"keyword":"$KEYWORD","limit":20}' | wechat-cli call-json search
 ```
 
@@ -162,6 +162,7 @@ wechat-cli watch "$CHAT" --cursor local_id:123 --jsonl --follow
 | `favorites` | 微信收藏 |
 | `export` | 显式本地文件写入：单个会话导出到 jsonl / markdown / html |
 | `schema` / `sql` | 只读数据库结构和 SQL 诊断 |
+| `stats` | metadata cache 计数，不是消息趋势统计 |
 | `cache status` / `cache refresh` | metadata cache 诊断与刷新 |
 
 典型消息行：
@@ -226,7 +227,7 @@ WECHAT_CLI_BIN=./wechat-cli WECHAT_READ_TEST_CHAT="$CHAT" WECHAT_READ_TEST_KEYWO
 macOS release 包：
 
 ```bash
-WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.17
+WECHAT_CLI_WCDB_DYLIB=/path/to/libWCDB.dylib ./scripts/package.sh 1.6.18
 ```
 
 Windows release 包由 GitHub Actions 的 `Windows Release Package` workflow 构建。

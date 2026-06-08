@@ -518,6 +518,21 @@ func TestTailSchemaExposesLimitBounds(t *testing.T) {
 	}
 }
 
+func TestToolSchemaExposesMutability(t *testing.T) {
+	timeline := toolDefByName("chat_timeline")
+	if !timeline.ReadOnly || !timeline.LocalWrite {
+		t.Fatalf("chat_timeline mutability = read_only:%v local_write:%v", timeline.ReadOnly, timeline.LocalWrite)
+	}
+	search := toolDefByName("search")
+	if !search.ReadOnly || search.LocalWrite {
+		t.Fatalf("search mutability = read_only:%v local_write:%v", search.ReadOnly, search.LocalWrite)
+	}
+	export := toolDefByName("export_messages")
+	if !export.ReadOnly || !export.LocalWrite {
+		t.Fatalf("export_messages mutability = read_only:%v local_write:%v", export.ReadOnly, export.LocalWrite)
+	}
+}
+
 func TestReadOSCapabilitiesSeparateLiveReadFromNameResolution(t *testing.T) {
 	caps := readOSCapabilities(true, true, false)
 	for _, key := range []string{"search", "sessions", "timeline", "context", "tail", "media"} {

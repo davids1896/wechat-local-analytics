@@ -68,9 +68,9 @@ Core commands:
 - `wechat-cli media "$CHAT" --type image --limit 10`
 - `wechat-cli tools`
 - `wechat-cli tools --profile all`
-- `wechat-cli call <tool> --key value`
-- `wechat-cli call-json <tool> '{"key":"value"}'`
-- `printf '{"chat":"$CHAT","limit":20}' | wechat-cli call-json chat_timeline`
+- `wechat-cli call <command-or-tool> --key value`
+- `wechat-cli call-json <command-or-tool> '{"key":"value"}'`
+- `printf '{"chat":"$CHAT","limit":20}' | wechat-cli call-json timeline`
 - `wechat-cli --strict-read-only timeline "$CHAT" --limit 20`
 
 Agent defaults:

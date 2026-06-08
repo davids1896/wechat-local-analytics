@@ -42,6 +42,8 @@ import (
 type toolDef struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	ReadOnly    bool   `json:"read_only"`
+	LocalWrite  bool   `json:"local_write"`
 	InputSchema any    `json:"inputSchema"`
 }
 

@@ -69,6 +69,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	cacheIndexExists := false
 	wcdbAvailable := false
 	var warnings []string
+	var degradedBy []string
 	blockedBy := ""
 	nextAction := ""
 	var suggestedCommands []string
@@ -125,6 +126,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 							cache["metadata_stale_reason"] = metadataStatusReason(reason)
 							if staleCacheIndexUsable(reason) {
 								cache["degraded"] = true
+								degradedBy = appendUniqueStrings(degradedBy, "metadata_cache_stale")
 								warnings = appendUniqueStrings(warnings, "metadata_cache_degraded")
 								if readiness == "ready" {
 									readiness = "degraded"
@@ -132,6 +134,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 							} else {
 								cache["blocked_reason"] = metadataStatusReason(reason)
 								cache["degraded"] = true
+								degradedBy = appendUniqueStrings(degradedBy, "metadata_cache_degraded")
 								warnings = appendUniqueStrings(warnings, "metadata_cache_degraded")
 								if readiness == "ready" {
 									readiness = "degraded"
@@ -160,8 +163,13 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		}
 		setBlocked("wcdb_missing", "Use an installed release or point WECHAT_CLI_WCDB_DYLIB/WECHAT_CLI_WCDB_LIB at the bundled WCDB library.", appName+" status --pretty")
 	}
-	status["capabilities"] = readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists)
+	capabilities = readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists)
+	status["capabilities"] = capabilities
+	status["live_read_ok"] = dbReady && wcdbAvailable
 	status["readiness"] = readiness
+	if len(degradedBy) > 0 {
+		status["degraded_by"] = degradedBy
+	}
 	if len(warnings) > 0 {
 		status["warnings"] = warnings
 	}

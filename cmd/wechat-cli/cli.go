@@ -864,7 +864,7 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 	case "invalid_json":
 		return cliAdvice{
 			NextAction:        "Pass a valid JSON object as argv or stdin.",
-			SuggestedCommands: []string{appName + ` call-json chat_timeline '{"chat":"$CHAT","limit":20}'`},
+			SuggestedCommands: []string{appName + ` call-json timeline '{"chat":"$CHAT","limit":20}'`},
 		}
 	case "missing_required_argument", "unknown_argument", "invalid_argument":
 		cmds := []string{}
@@ -1360,7 +1360,7 @@ func toolDefByName(name string) toolDef {
 	name = normalizeCLIName(name)
 	for _, td := range toolDefs {
 		if normalizeCLIName(td.Name) == name {
-			return td
+			return annotateToolDef(td)
 		}
 	}
 	return toolDef{}

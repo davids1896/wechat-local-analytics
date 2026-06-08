@@ -30,7 +30,9 @@ func jsonSchema(properties props, required []string) any {
 
 func listedToolDefs() []toolDef {
 	out := make([]toolDef, len(toolDefs))
-	copy(out, toolDefs)
+	for i, td := range toolDefs {
+		out[i] = annotateToolDef(td)
+	}
 	return out
 }
 
@@ -54,13 +56,37 @@ func listedToolDefsForProfile(profile string) ([]toolDef, bool) {
 }
 
 func displayToolDef(td toolDef) toolDef {
+	td = annotateToolDef(td)
 	out := toolDef{
 		Name:        td.Name,
 		Description: displayToolDescription(td),
+		ReadOnly:    td.ReadOnly,
+		LocalWrite:  td.LocalWrite,
 		InputSchema: cloneSchemaValue(td.InputSchema),
 	}
 	hideInputProperties(out.InputSchema, hiddenDisplayProps(td.Name))
 	return out
+}
+
+func annotateToolDef(td toolDef) toolDef {
+	td.ReadOnly = toolWechatReadOnly(td.Name)
+	td.LocalWrite = toolMayWriteLocalFiles(td.Name)
+	return td
+}
+
+func toolWechatReadOnly(name string) bool {
+	return name != ""
+}
+
+func toolMayWriteLocalFiles(name string) bool {
+	switch name {
+	case "cache_refresh", "cache_rebuild", "export_messages":
+		return true
+	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history":
+		return true
+	default:
+		return false
+	}
 }
 
 func displayToolDescription(td toolDef) string {
@@ -693,7 +719,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "stats",
-		Description: "metadata cache 状态统计. wechat-cli 不缓存聊天正文, 因此只返回 sessions/contacts 计数和提示.",
+		Description: "metadata cache 状态统计, 不是消息趋势/search 统计. wechat-cli 不缓存聊天正文, 因此只返回 sessions/contacts 计数和提示.",
 		InputSchema: jsonSchema(props{}, nil),
 	},
 	{
