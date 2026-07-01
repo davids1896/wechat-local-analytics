@@ -471,7 +471,7 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		switch tf {
 		case "group":
 			where = append(where, "username LIKE '%@chatroom'")
-		case "friend":
+		case "friend", "private":
 			where = append(where, `username NOT LIKE '%@chatroom'
 				AND username NOT LIKE 'gh!_%' ESCAPE '!'
 				AND username NOT LIKE '%@openim'

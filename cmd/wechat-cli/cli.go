@@ -66,6 +66,7 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "coverage", Tool: "read_os", Usage: appName + " coverage", Description: "Show the WeChat Read OS coverage matrix.", Examples: []string{appName + " coverage --pretty"}},
 	{Command: "workflows", Aliases: []string{"playbook", "recipes"}, Tool: "read_os", Usage: appName + " workflows", Description: "Show agent workflows and command recipes.", Examples: []string{appName + " workflows --pretty"}},
 	{Command: "update", Aliases: []string{"upgrade", "self-update", "self_update"}, Usage: appName + " update [--dry-run] [--tag vX.Y.Z]", Description: "Update an installed release to the latest GitHub release.", Examples: []string{appName + " update", appName + " update --dry-run"}},
+	{Command: "companion", Aliases: []string{"sidecar"}, Usage: appName + " companion [--addr 127.0.0.1:18789] [--desktop=false|--browser|--open=false]", Description: "Start the read-only local WeChat Assistant V1 sidecar GUI. On macOS it opens a native WebKit desktop window by default.", Examples: []string{appName + " companion", appName + " companion --browser", appName + " companion --addr 127.0.0.1:18789 --open=false"}},
 	{Command: "call", Usage: appName + " call <command-or-tool> [--key value ...]", Description: "Call a command/tool with key/value CLI arguments.", Examples: []string{appName + ` call timeline --chat "$CHAT" --limit 20`}},
 	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <command-or-tool> '<json args>'", Description: "Call a command/tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json timeline '{"chat":"$CHAT","limit":20}'`, appName + ` call-json search-context '{"keyword":"$KEYWORD","limit":5}'`}},
 	{Command: "tool-schema", Aliases: []string{"describe", "describe-tool", "tool_schema"}, Usage: appName + " tool-schema <command-or-tool>", Description: "Return one command/tool schema.", Examples: []string{appName + " tool-schema timeline"}},
@@ -151,6 +152,9 @@ func maybeRunCLI(args []string) bool {
 		return true
 	case "update", "upgrade", "self-update", "self_update":
 		runUpdateCLI(args[1:], opts)
+		return true
+	case "companion", "sidecar":
+		runCompanionCLI(args[1:], opts)
 		return true
 	case "call":
 		runGenericToolCLI(args[1:], opts)
@@ -416,8 +420,16 @@ func runCacheCLI(args []string, opts cliOptions) {
 }
 
 func runToolCLI(name string, flags map[string]any, opts cliOptions, command string) {
+	data, errCode, err := runToolResult(name, flags, command)
+	if err != nil {
+		exitCLIError(opts, 1, errCode, err.Error(), name, command)
+	}
+	writeCLISuccess(name, command, data, opts)
+}
+
+func runToolResult(name string, flags map[string]any, command string) (any, string, error) {
 	if err := validateToolArgs(name, flags); err != nil {
-		exitCLIError(opts, 1, cliErrorCode(err), err.Error(), name, command)
+		return nil, cliErrorCode(err), err
 	}
 	srv := &server{}
 	var result any
@@ -485,9 +497,9 @@ func runToolCLI(name string, flags map[string]any, opts cliOptions, command stri
 		err = fmt.Errorf("unknown cli tool %q", name)
 	}
 	if err != nil {
-		exitCLIError(opts, 1, "tool_error", err.Error(), name, command)
+		return nil, "tool_error", err
 	}
-	writeCLISuccess(name, command, cliAgentDataEnvelope(name, command, flags, result), opts)
+	return cliAgentDataEnvelope(name, command, flags, result), "", nil
 }
 
 func runTailCLI(flags map[string]any, opts cliOptions, command string) {
@@ -1095,7 +1107,7 @@ func parseKVFlags(args []string) map[string]any {
 
 func isBoolCLIFlag(key string) bool {
 	switch key {
-	case "background", "debug", "follow", "force", "friends_only", "from_me", "groups_only", "include_anchor", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "include_status", "include_text", "jsonl", "snippet_only", "stats":
+	case "allow_remote", "background", "browser", "debug", "desktop", "follow", "force", "friends_only", "from_me", "groups_only", "include_anchor", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "include_status", "include_text", "jsonl", "no_open", "open", "snippet_only", "stats":
 		return true
 	default:
 		return false

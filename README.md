@@ -61,6 +61,7 @@ wechat-cli sessions
 ```bash
 wechat-cli agent --pretty
 wechat-cli status --pretty
+wechat-cli companion
 wechat-cli sessions
 wechat-cli resolve-chat "$CHAT"
 wechat-cli timeline "$CHAT" --limit 20
@@ -108,6 +109,24 @@ WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
 strict 模式只读已有数据库/已有文件；不会自动刷新 metadata/key，不生成媒体解码 cache
 或语音转写 cache，也会拒绝 `cache refresh/rebuild` 和 `export` 这类本地写命令。
 
+## 微信助手 V1
+
+`companion` 会启动一个本地只读 sidecar GUI，默认监听 `127.0.0.1:18789`。macOS 上默认打开原生 WebKit 桌面窗口；需要浏览器时传 `--browser`：
+
+```bash
+wechat-cli companion
+wechat-cli companion --browser
+wechat-cli companion --addr 127.0.0.1:18789 --open=false
+```
+
+V1 页面默认是对话式输入和附件收集面。`@` 补全只用于输入时快速提示会话目标，支持大小写不敏感搜索和中文名拼音首字母，例如 `@agent` 可匹配包含 agent 的会话，`@zyg` 可匹配 `郑宇格`。发送问题时 harness 不预取聊天正文、不固定读取条数，也不替 agent 决定该看哪个群、哪段时间、哪些图片；这些读取决策交给后端 CPU 通过 `wechat-cli` 自主完成。
+
+它不发送微信消息、不控制微信 UI，也不会把微信上下文发给模型，直到你主动输入并发送问题。
+
+微信助手不选择模型、不保存模型密钥、不接外部协议适配层、不暴露工具描述中转、不管理后端会话，也不适配“没有 shell/CLI 能力”的 agent。CPU 调度默认交给 `babata-cpu`；只有显式设置 `WECHAT_CLI_COMPANION_CPU_*` / `BABATA_CPU_*` 环境变量时才透传覆盖。宿主/后端 CPU 可从响应里的 handoff 字段读取薄 system prompt、用户问题、可信附件本机路径，以及当前 `wechat-cli` 的 CLI mount 信息；这些内部字段不作为聊天答案展示。CLI mount 会暴露当前二进制路径，并把二进制目录作为 PATH prepend 提供给后端运行环境。
+
+当前 `companion` 子命令名保留为兼容入口；用户可见产品名是微信助手。
+
 `freshness` 是返回数据的新鲜度/诊断信息：例如是否触发过 metadata 自动刷新、分页是否还有下一页、结果是否可能受缺 key 或 cache 滞后影响。`status` / `agent` 会直接给出 `readiness=ready|degraded|blocked`；如果 metadata cache 可用但已滞后，会返回 `warnings=["metadata_cache_degraded"]` 和具体 stale reason。
 
 `agent` 是 agent 进入微信读取环境的总入口。它返回当前能力矩阵、推荐工作流、质量验收命令和本机 readiness，不会读取大量聊天正文，也不会修改微信数据；`read-os` 仍是兼容别名：
@@ -147,6 +166,7 @@ wechat-cli watch "$CHAT" --cursor local_id:123 --jsonl --follow
 | `agent` | WeChat Read OS 总入口：覆盖率矩阵、工作流、质量验收、本机状态 |
 | `status` / `coverage` / `workflows` | 更短的状态、覆盖率、工作流入口 |
 | `update` | 更新到 GitHub latest release |
+| `companion` | 本地只读微信助手 GUI，生成后端 CPU handoff 并挂载 `wechat-cli` |
 | `sessions` | 最近会话、未读数、最后消息摘要 |
 | `resolve-chat` | 把昵称、备注、群名解析成稳定 talker |
 | `timeline` | 普通读聊天的首选入口，返回 `query` / `freshness` / `messages` |
