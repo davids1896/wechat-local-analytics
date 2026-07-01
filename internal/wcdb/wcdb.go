@@ -37,16 +37,16 @@ var (
 	sqlite3_open_v2        func(filename string, ppDb *uintptr, flags int32, vfs *byte) int32
 	sqlite3_close_v2       func(db uintptr) int32
 	sqlite3_key_v2         func(db uintptr, zDbName string, pKey unsafe.Pointer, nKey int32) int32
-	sqlite3_exec           func(db uintptr, sql string, cb uintptr, arg uintptr, errmsg *uintptr) int32
+	sqlite3_exec           func(db uintptr, sql string, cb uintptr, arg uintptr, errmsg *unsafe.Pointer) int32
 	sqlite3_prepare_v2     func(db uintptr, sql string, nByte int32, stmt *uintptr, tail *uintptr) int32
 	sqlite3_step           func(stmt uintptr) int32
 	sqlite3_finalize       func(stmt uintptr) int32
 	sqlite3_column_count   func(stmt uintptr) int32
-	sqlite3_column_name    func(stmt uintptr, i int32) uintptr
-	sqlite3_column_text    func(stmt uintptr, i int32) uintptr
+	sqlite3_column_name    func(stmt uintptr, i int32) unsafe.Pointer
+	sqlite3_column_text    func(stmt uintptr, i int32) unsafe.Pointer
 	sqlite3_column_int64   func(stmt uintptr, i int32) int64
 	sqlite3_column_bytes   func(stmt uintptr, i int32) int32
-	sqlite3_column_blob    func(stmt uintptr, i int32) uintptr
+	sqlite3_column_blob    func(stmt uintptr, i int32) unsafe.Pointer
 	sqlite3_column_type    func(stmt uintptr, i int32) int32
 	sqlite3_bind_text      func(stmt uintptr, i int32, s string, n int32, destructor uintptr) int32
 	sqlite3_bind_blob      func(stmt uintptr, i int32, p unsafe.Pointer, n int32, destructor uintptr) int32
@@ -54,7 +54,7 @@ var (
 	sqlite3_bind_null      func(stmt uintptr, i int32) int32
 	sqlite3_reset          func(stmt uintptr) int32
 	sqlite3_clear_bindings func(stmt uintptr) int32
-	sqlite3_errmsg         func(db uintptr) uintptr
+	sqlite3_errmsg         func(db uintptr) unsafe.Pointer
 	sqlite3_backup_init    func(dst uintptr, dstName string, src uintptr, srcName string) uintptr
 	sqlite3_backup_step    func(backup uintptr, pages int32) int32
 	sqlite3_backup_finish  func(backup uintptr) int32
@@ -432,7 +432,7 @@ func (d *DB) Close() {
 }
 
 func (d *DB) Exec(sql string) error {
-	var errPtr uintptr
+	var errPtr unsafe.Pointer
 	if rc := sqlite3_exec(d.handle, sql, 0, 0, &errPtr); rc != SQLITE_OK {
 		return fmt.Errorf("exec rc=%d: %s", rc, readCString(errPtr))
 	}
@@ -579,8 +579,8 @@ func readColumn(stmt uintptr, i int32) any {
 			return []byte{}
 		}
 		p := sqlite3_column_blob(stmt, i)
-		b := make([]byte, n)
-		copy(b, unsafe.Slice((*byte)(unsafe.Pointer(p)), n))
+		b := make([]byte, int(n))
+		copy(b, unsafe.Slice((*byte)(p), int(n)))
 		return b
 	case COL_NULL:
 		return nil
@@ -588,13 +588,13 @@ func readColumn(stmt uintptr, i int32) any {
 	return nil
 }
 
-func readCString(p uintptr) string {
-	if p == 0 {
+func readCString(p unsafe.Pointer) string {
+	if p == nil {
 		return ""
 	}
 	n := 0
 	for {
-		b := *(*byte)(unsafe.Pointer(p + uintptr(n)))
+		b := *(*byte)(unsafe.Add(p, n))
 		if b == 0 {
 			break
 		}
@@ -606,7 +606,7 @@ func readCString(p uintptr) string {
 	if n == 0 {
 		return ""
 	}
-	return string(unsafe.Slice((*byte)(unsafe.Pointer(p)), n))
+	return string(unsafe.Slice((*byte)(p), n))
 }
 
 func errmsg(db uintptr) string {
