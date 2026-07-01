@@ -471,7 +471,7 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		switch tf {
 		case "group":
 			where = append(where, "username LIKE '%@chatroom'")
-		case "friend":
+		case "friend", "private":
 			where = append(where, `username NOT LIKE '%@chatroom'
 				AND username NOT LIKE 'gh!_%' ESCAPE '!'
 				AND username NOT LIKE '%@openim'
@@ -4728,7 +4728,10 @@ func (s *server) voiceAudioForASR(path string) (string, error) {
 func (s *server) decodeSILKVoiceToWAV(path string) (string, error) {
 	decoder := findSILKDecoder()
 	if decoder == "" {
-		return "", fmt.Errorf("SILK decoder not found; set WECHAT_CLI_SILK_DECODER")
+		if python := findPysilkPython(); python != "" {
+			return s.decodeSILKVoiceToWAVWithPysilk(path, python)
+		}
+		return "", fmt.Errorf("SILK decoder not found; run wechat-cli asr setup or set WECHAT_CLI_SILK_DECODER")
 	}
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	wavPath := base + ".wav"
@@ -4858,9 +4861,10 @@ print("".join(segment.text for segment in segments).strip())
 
 func findFasterWhisperPython() string {
 	var candidates []string
-	if p := envFirst("WECHAT_CLI_FASTER_WHISPER_PYTHON", "WX_MCP_FASTER_WHISPER_PYTHON"); p != "" {
+	if p := envFirst("WECHAT_CLI_FASTER_WHISPER_PYTHON", "WECHAT_CLI_ASR_PYTHON", "WX_MCP_FASTER_WHISPER_PYTHON", "WX_MCP_ASR_PYTHON"); p != "" {
 		candidates = append(candidates, p)
 	}
+	candidates = append(candidates, defaultASRPythonCandidates()...)
 	if home, _ := os.UserHomeDir(); home != "" {
 		candidates = append(candidates,
 			filepath.Join(home, ".hermes", "venv", "bin", "python3"),
@@ -4887,9 +4891,7 @@ func findFasterWhisperPython() string {
 }
 
 func pythonHasFasterWhisper(python string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return exec.CommandContext(ctx, python, "-c", "import faster_whisper").Run() == nil
+	return pythonHasModule(python, "faster_whisper")
 }
 
 func runConfiguredVoiceTranscriber(command, audioPath string) (string, error) {

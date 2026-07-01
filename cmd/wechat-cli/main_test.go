@@ -1478,6 +1478,54 @@ func main() {
 	}
 }
 
+func TestASRSetupDryRunUsesStateVenv(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("WECHAT_CLI_STATE_DIR", stateDir)
+	t.Setenv("WECHAT_CLI_ASR_SETUP_PYTHON", "/tmp/test-python3")
+
+	got, err := asrSetup(asrSetupOptions{DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVenv := filepath.Join(stateDir, "asr-venv")
+	if got["dry_run"] != true || got["venv"] != wantVenv || got["model"] != "large-v3" {
+		t.Fatalf("dry-run setup = %#v", got)
+	}
+	if _, err := os.Stat(wantVenv); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry-run created venv or unexpected stat error: %v", err)
+	}
+}
+
+func TestFindFasterWhisperPythonUsesWechatASRVenv(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("WECHAT_CLI_STATE_DIR", stateDir)
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_PYTHON", "")
+	t.Setenv("WX_MCP_FASTER_WHISPER_PYTHON", "")
+
+	venv, err := defaultASRVenvDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	python := asrVenvPythonPath(venv)
+	buildTestBinaryAt(t, python, `package main
+
+import (
+	"os"
+)
+
+func main() {
+	if len(os.Args) == 3 && os.Args[1] == "-c" && os.Args[2] == "import faster_whisper" {
+		return
+	}
+	os.Exit(1)
+}
+`)
+
+	if got := findFasterWhisperPython(); got != python {
+		t.Fatalf("findFasterWhisperPython() = %q, want %q", got, python)
+	}
+}
+
 func TestSplitWindowsCommandLine(t *testing.T) {
 	got, ok := splitWindowsCommandLine(`"C:\Program Files\wechat-cli\asr.exe" --input "{audio}"`)
 	if !ok {
@@ -1494,6 +1542,21 @@ func TestSplitWindowsCommandLine(t *testing.T) {
 	}
 	if _, ok := splitWindowsCommandLine(`"unterminated`); ok {
 		t.Fatal("splitWindowsCommandLine accepted unterminated quote")
+	}
+}
+
+func buildTestBinaryAt(t *testing.T, path, source string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "main.go")
+	if err := os.WriteFile(src, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", path, src)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, out)
 	}
 }
 

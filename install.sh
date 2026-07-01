@@ -24,7 +24,14 @@ MODE="install"
 DO_BOOTSTRAP=0
 DO_REFRESH=0
 DO_WATCHER=0
+DO_ASR=0
 PURGE_STATE=0
+
+case "${WECHAT_CLI_WITH_ASR:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    DO_ASR=1
+    ;;
+esac
 
 CLI_MODE=""
 CLI_SOURCE=""
@@ -35,6 +42,7 @@ LIB_SOURCE=""
 WATCHER_INSTALLED=0
 BOOTSTRAP_RAN=0
 REFRESH_RAN=0
+ASR_RAN=0
 INSTALL_STATUS="ok"
 BLOCKED_BY=""
 NEXT_ACTION=""
@@ -68,6 +76,9 @@ Install options:
   --refresh                 Start wechat-cli metadata cache refresh after installing binaries.
                             Defaults to background warmup; set
                             WECHAT_CLI_INSTALL_SYNC_REFRESH=1 for foreground wait.
+  --with-asr                Install optional local voice transcription runtime
+                            under ~/.wechat-cli/asr-venv and preload
+                            faster-whisper large-v3.
   --watcher                 Install launchd cache watcher (5-min periodic
                             metadata cache refresh). WARNING: on macOS 15+ each refresh
                             triggers a "wechat-cli wants to access another app's
@@ -160,6 +171,7 @@ emit_json() {
   print "  \"watcher_installed\": $(json_bool "$WATCHER_INSTALLED"),"
   print "  \"bootstrap_ran\": $(json_bool "$BOOTSTRAP_RAN"),"
   print "  \"refresh_ran\": $(json_bool "$REFRESH_RAN"),"
+  print "  \"asr_ran\": $(json_bool "$ASR_RAN"),"
   print "  \"purge_state\": $(json_bool "$PURGE_STATE"),"
   print -n "  \"checks\": "; json_array "${CHECKS[@]}"; print ","
   print -n "  \"actions\": "; json_array "${ACTIONS[@]}"; print ","
@@ -183,6 +195,7 @@ print_human_result() {
   [[ -n "$NEXT_ACTION" ]] && print "  next: $NEXT_ACTION"
   [[ "$BOOTSTRAP_RAN" -eq 1 ]] && print "  key_setup: complete"
   [[ "$REFRESH_RAN" -eq 1 ]] && print "  metadata_cache: started"
+  [[ "$ASR_RAN" -eq 1 ]] && print "  voice_asr: installed"
   [[ "$WATCHER_INSTALLED" -eq 1 ]] && print "  watcher: installed"
   if [[ "${#WARNINGS[@]}" -gt 0 ]]; then
     print "  warnings:"
@@ -439,6 +452,14 @@ parse_args() {
         ;;
       --no-refresh)
         DO_REFRESH=0
+        shift
+        ;;
+      --with-asr)
+        DO_ASR=1
+        shift
+        ;;
+      --no-asr)
+        DO_ASR=0
         shift
         ;;
       --watcher)
@@ -734,6 +755,17 @@ run_cache_refresh() {
     CHECKS+=("cache_refresh_background=true")
   fi
   REFRESH_RAN=1
+}
+
+run_asr_setup() {
+  [[ "$DO_ASR" -eq 1 ]] || return
+  ACTIONS+=("run wechat-cli asr setup")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  run_logged "$INSTALL_DIR/$APP_NAME" asr setup || die "ASR setup failed; see $INSTALL_LOG. Run $INSTALL_DIR/$APP_NAME asr status --pretty for diagnostics." 1
+  ASR_RAN=1
+  CHECKS+=("asr_setup=true")
 }
 
 write_watcher_script() {
@@ -1041,6 +1073,7 @@ main() {
       install_components
       install_cli_shim
       cleanup_legacy_message_cache
+      run_asr_setup
       run_bootstrap
       run_cache_refresh
       install_watcher
@@ -1053,6 +1086,7 @@ main() {
       install_components
       install_cli_shim
       cleanup_legacy_message_cache
+      run_asr_setup
       run_bootstrap
       run_cache_refresh
       install_watcher

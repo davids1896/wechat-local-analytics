@@ -54,6 +54,10 @@ Release zip contents:
   `scripts/install-release.sh`
 - Windows: `wechat-cli.exe`, `libWCDB.dll`, `install.ps1`, docs, and
   `scripts/install-release.ps1`
+- Optional voice ASR is not bundled into the default release. Users explicitly
+  opt in with installer `--with-asr` / `-WithASR` or `wechat-cli asr setup`.
+  Setup creates `~/.wechat-cli/asr-venv`, installs `faster-whisper` and
+  `silk-python`, and preloads `large-v3` unless `--skip-model-download` is set.
 
 ## Runtime Facts
 
@@ -263,8 +267,9 @@ SILK, and duplicate candidate paths belong in `include_debug=true`,
 Images/videos in agent view should expose directly readable local `path` values
 only. Voice rows are read from `media_0.db` / `VoiceInfo`; wechat-cli attempts
 local transcription with `faster-whisper large-v3` first and returns
-`voice.transcript` by default, while raw SILK/WAV paths stay in debug/media
-output.
+`voice.transcript` by default. If no external `silk_v3_decoder` exists, the
+ASR venv's `pysilk` module is the fallback SILK decoder. Raw SILK/WAV paths
+stay in debug/media output.
 
 wechat-cli best-effort decodes local image `.dat` files into
 `~/.wechat-cli/media-cache`; if WeChat V4 image `image_key` or `image_xor_key`
