@@ -2733,22 +2733,12 @@ type companionPrompt struct {
 	User   string
 }
 
-func companionBuildPrompt(req companionAskRequest, timeline map[string]any, messages []map[string]any) companionPrompt {
-	return companionBuildPromptFromContexts(req, []companionChatContext{{
-		Chat:        req.Chat,
-		DisplayName: companionTimelineTitle(timeline, req.Chat),
-		Timeline:    timeline,
-		Messages:    messages,
-	}}, nil)
-}
-
 func companionBuildPromptFromContexts(req companionAskRequest, contexts []companionChatContext, contextErrors []string) companionPrompt {
 	mode := companionMode(req.Mode)
 	chats := companionAskChats(req)
 	explicitChats := len(chats) > 0
 	system := strings.Join([]string{
 		"你是用户的本地微信助手。",
-		"本机已挂载 wechat-cli；需要微信内容时直接调用 CLI 读取。",
 		"不要声称已读到未读取的微信内容，也不要声称已发送微信消息。",
 		"用中文回答。",
 	}, "\n")

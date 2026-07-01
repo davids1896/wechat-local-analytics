@@ -71,11 +71,17 @@ func TestCompanionBuildPromptKeepsRecentMessages(t *testing.T) {
 			"newest_time":  "2026-06-08 10:00",
 		},
 	}
-	prompt := companionBuildPrompt(companionAskRequest{
+	req := companionAskRequest{
 		Chat:     "AI Native",
 		Mode:     "value",
 		Question: "有什么值得关注",
-	}, timeline, messages)
+	}
+	prompt := companionBuildPromptFromContexts(req, []companionChatContext{{
+		Chat:        req.Chat,
+		DisplayName: companionTimelineTitle(timeline, req.Chat),
+		Timeline:    timeline,
+		Messages:    messages,
+	}}, nil)
 	if !strings.Contains(prompt.User, "有什么值得关注") {
 		t.Fatalf("prompt missing user question:\n%s", prompt.User)
 	}
@@ -112,8 +118,11 @@ func TestCompanionBuildPromptTreatsMentionsAsHintsOnly(t *testing.T) {
 	if !strings.Contains(prompt.User, "用户通过 @ 提到的微信会话目标：群A") || !strings.Contains(prompt.User, "当前没有预置微信聊天正文") {
 		t.Fatalf("prompt should treat mentions as target hints:\n%s", prompt.User)
 	}
-	if !strings.Contains(prompt.System, "本机已挂载 wechat-cli") || !strings.Contains(prompt.System, "直接调用 CLI") {
-		t.Fatalf("system prompt should only mount the CLI:\n%s", prompt.System)
+	if strings.Contains(prompt.System, "本机已挂载 wechat-cli") || strings.Contains(prompt.System, "直接调用 CLI") {
+		t.Fatalf("system prompt should not duplicate the CPU execution boundary:\n%s", prompt.System)
+	}
+	if !strings.Contains(prompt.System, "不要声称已读到未读取的微信内容") {
+		t.Fatalf("system prompt should keep the evidence boundary:\n%s", prompt.System)
 	}
 	for _, banned := range []string{"默认读 80", `"limit":20`, "没有可用终端"} {
 		if strings.Contains(prompt.System, banned) {
