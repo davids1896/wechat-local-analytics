@@ -18,6 +18,8 @@ Install:
   1. `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
   2. `wechat-cli sessions --limit 5 --pretty`
 - Default install is CLI-only: no external protocol registration, no watcher.
+- Voice transcription is opt-in: add `--with-asr` to the release installer, or run `wechat-cli asr setup` after install. This creates `~/.wechat-cli/asr-venv`, installs `faster-whisper` plus `silk-python`, and preloads `large-v3` unless `--skip-model-download` is passed.
+- Check voice readiness with `wechat-cli asr status --pretty`; `wechat_voice_ready=true` means both ASR and WeChat SILK decode support are available.
 - The final `sessions --limit 5 --pretty` command is the user-facing success test: `ok: true` plus recent sessions means install, key setup, and DB reads are working.
 - macOS first key setup is explicit and quality-first: `wxkey bootstrap` may take several minutes; do not interrupt it just because the key scan or PBKDF fallback is still running.
 - On WeChat 4.1.10+, `wxkey bootstrap` may first show passive scan `found=0` or `initial passive scan did not capture DB keys before its deadline`, then continue into `PBKDF breakpoint fallback`; this is expected when the final output reaches `[OK] key config written`.
@@ -54,6 +56,8 @@ Core commands:
 - `wechat-cli update`
 - `wechat-cli agent --pretty`
 - `wechat-cli status --pretty`
+- `wechat-cli asr status --pretty`
+- `wechat-cli asr setup`
 - `wechat-cli coverage --pretty`
 - `wechat-cli workflows --pretty`
 - `wechat-cli sessions`

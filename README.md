@@ -30,6 +30,34 @@ wechat-cli sessions --limit 5 --pretty
 - macOS: `~/.local/bin/wechat-cli`
 - Windows: `%LOCALAPPDATA%\Microsoft\WindowsApps\wechat-cli.cmd`，如该目录不存在则使用 `%USERPROFILE%\.local\bin\wechat-cli.cmd`
 
+如果需要微信语音自动转文字，安装时显式加 ASR 选项：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh -s -- --with-asr
+wechat-cli asr status --pretty
+```
+
+Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_WITH_ASR','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"
+wechat-cli asr status --pretty
+```
+
+已有安装也可以单独执行：
+
+```bash
+wechat-cli asr setup
+wechat-cli asr status --pretty
+```
+
+`asr setup` 会在 `~/.wechat-cli/asr-venv` 创建本地 Python venv，安装
+`faster-whisper` 和 `silk-python`，并默认预下载 `large-v3` 模型。模型和转写都留在本机；
+首次下载可能较慢、占用数 GB 磁盘。如果只想先装依赖、不预下载模型，可传
+`wechat-cli asr setup --skip-model-download`。如果你已经有自己的转写器，也可以设置
+`WECHAT_CLI_VOICE_TRANSCRIBE_CMD`；如果你已经有外部 SILK decoder，可设置
+`WECHAT_CLI_SILK_DECODER`。
+
 读取微信数据前请确认：
 
 - macOS arm64 + WeChat 4.x，或 Windows amd64 + Windows WeChat / Weixin 4.x
@@ -61,6 +89,7 @@ wechat-cli sessions
 ```bash
 wechat-cli agent --pretty
 wechat-cli status --pretty
+wechat-cli asr status --pretty
 wechat-cli companion
 wechat-cli sessions
 wechat-cli resolve-chat "$CHAT"

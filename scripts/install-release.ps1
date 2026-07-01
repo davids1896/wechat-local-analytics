@@ -7,6 +7,7 @@ param(
   [string]$Asset = $env:WECHAT_CLI_RELEASE_ASSET,
   [string]$InstallDir = $env:WECHAT_CLI_INSTALL_DIR,
   [switch]$All,
+  [switch]$WithASR,
   [switch]$BackgroundRefresh,
   [switch]$KeepDownload
 )
@@ -18,6 +19,7 @@ if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "latest" }
 if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wechat-cli-latest-windows-amd64.zip" }
 if ($env:WECHAT_CLI_INSTALL_JSON -eq "1") { $Json = $true }
 if ($env:WECHAT_CLI_KEEP_DOWNLOAD -eq "1") { $KeepDownload = $true }
+if ($env:WECHAT_CLI_WITH_ASR -match '^(1|true|yes|on)$') { $WithASR = $true }
 
 function Write-Step([string]$Text) {
   if ($Json) {
@@ -131,6 +133,9 @@ try {
   }
   if ($All) {
     $installerArgs += "-All"
+  }
+  if ($WithASR) {
+    $installerArgs += "-WithASR"
   }
   $installerArgs += "-Yes"
   if ($DryRun) { $installerArgs += "-DryRun" }

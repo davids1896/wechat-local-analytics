@@ -9,6 +9,7 @@ param(
   [switch]$ClearState,
   [switch]$Refresh,
   [switch]$BackgroundRefresh,
+  [switch]$WithASR,
   [switch]$Doctor,
   [string]$InstallDir = $env:WECHAT_CLI_INSTALL_DIR,
   [string]$BinDir = $env:WECHAT_CLI_BIN_DIR
@@ -49,7 +50,11 @@ $nextAction = ""
 $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
 $refreshRan = $false
+$asrRan = $false
 $purgeState = [bool]($PurgeState -or $ClearState)
+if ($env:WECHAT_CLI_WITH_ASR -match '^(1|true|yes|on)$') {
+  $WithASR = $true
+}
 
 function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
@@ -77,6 +82,9 @@ function Write-HumanResult($Out) {
   }
   if ($Out.refresh_ran) {
     Write-Host "  metadata_cache: complete"
+  }
+  if ($Out.asr_ran) {
+    Write-Host "  voice_asr: installed"
   }
   if ($Out.warnings.Count -gt 0) {
     Write-Host "  warnings:"
@@ -111,6 +119,7 @@ function Finish {
     dry_run = [bool]$DryRun
     purge_state = [bool]$script:purgeState
     refresh_ran = [bool]$script:refreshRan
+    asr_ran = [bool]$script:asrRan
     actions = @($actions)
     warnings = @($warnings)
     errors = @($errors)
@@ -328,6 +337,18 @@ function Run-CacheRefresh {
   $script:refreshRan = $true
 }
 
+function Run-ASRSetup {
+  if (-not $WithASR) { return }
+  $exe = Join-Path $InstallDir "$AppName.exe"
+  Add-Action "run wechat-cli asr setup"
+  if ($DryRun) { return }
+  & $exe asr setup 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "ASR setup failed with exit code $LASTEXITCODE; run $exe asr status --pretty for diagnostics"
+  }
+  $script:asrRan = $true
+}
+
 function Clear-LegacyMessageCache {
   foreach ($cacheRoot in @((Join-Path $HOME ".wechat-cli\cache"), (Join-Path $HOME ".wx-mcp\cache"))) {
     if (-not (Test-Path $cacheRoot)) { continue }
@@ -490,6 +511,7 @@ try {
   Install-Components
   Install-CliShim
   Clear-LegacyMessageCache
+  Run-ASRSetup
   Run-CacheRefresh
   if ($DryRun) {
     $status = "dry_run"

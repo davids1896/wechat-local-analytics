@@ -190,6 +190,7 @@ func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[strin
 		"context":         liveRead,
 		"tail":            liveRead,
 		"media":           liveRead,
+		"voice_asr":       asrReadyBool(asrStatusData()["wechat_voice_ready"]),
 		"name_resolution": cacheIndexExists,
 	}
 }
@@ -214,6 +215,8 @@ func readOSEntrypoints() []map[string]any {
 		{"command": "status", "tool": "read_os", "use": "quick local readiness check"},
 		{"command": "coverage", "tool": "read_os", "use": "coverage matrix only"},
 		{"command": "workflows", "tool": "read_os", "use": "command recipes only"},
+		{"command": "asr status", "tool": "asr", "use": "check optional local voice transcription runtime"},
+		{"command": "asr setup", "tool": "asr", "use": "install optional faster-whisper and SILK decode support in a local venv", "local_file_write": true},
 		{"command": "sessions", "tool": "sessions", "use": "list recent chats and unread counts"},
 		{"command": "resolve-chat", "tool": "resolve_chat", "use": "turn a human name/group name into a stable talker id"},
 		{"command": "timeline", "tool": "chat_timeline", "use": "read a chat window in display order; page with offset/next_offset"},

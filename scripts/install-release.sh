@@ -12,12 +12,17 @@ CLEANUP_DIR=""
 
 typeset -a INSTALL_ARGS
 INSTALL_ARGS=(--yes)
+case "${WECHAT_CLI_WITH_ASR:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    INSTALL_ARGS+=(--with-asr)
+    ;;
+esac
 
 usage() {
   cat <<'EOF'
 Usage:
   curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
-  ./scripts/install-release.sh [--dry-run] [--json] [--update] [installer args...]
+  ./scripts/install-release.sh [--dry-run] [--json] [--update] [--with-asr] [installer args...]
   ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
 
 Environment:
