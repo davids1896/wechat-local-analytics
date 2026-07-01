@@ -1791,14 +1791,6 @@ func companionToolCommandFromInput(name string, input map[string]any) string {
 	return name
 }
 
-func companionToolSummaryFromInput(name string, input map[string]any) string {
-	command := companionToolCommandFromInput(name, input)
-	if command != "" && command != name {
-		return companionTraceText(command, 220)
-	}
-	return companionTraceText(name, 120)
-}
-
 func companionTraceGenericArgs(input map[string]any) map[string]any {
 	if len(input) == 0 {
 		return nil
@@ -1843,40 +1835,6 @@ func companionToolResultText(v any) string {
 	default:
 		return strings.TrimSpace(fmt.Sprint(v))
 	}
-}
-
-func companionExecCLIJSON(ctx context.Context, args []string, strictReadOnly bool) (any, string, error) {
-	binary := firstNonEmpty(companionCurrentCLIBinary(), appName)
-	runCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, binary, args...)
-	cmd.Env = companionCLIChildEnv(strictReadOnly)
-	cmd.Dir = companionCLIWorkDir()
-	cmd.Stdin = nil
-	output, err := cmd.CombinedOutput()
-	if runCtx.Err() == context.DeadlineExceeded {
-		return nil, "timeout", fmt.Errorf("wechat-cli %s timed out", strings.Join(args, " "))
-	}
-	var envelope map[string]any
-	if len(output) > 0 {
-		if jsonErr := json.Unmarshal(output, &envelope); jsonErr != nil {
-			if err != nil {
-				return nil, "tool_error", fmt.Errorf("%v: %s", err, companionTraceText(string(output), 400))
-			}
-			return nil, "invalid_json", jsonErr
-		}
-	}
-	if err != nil {
-		if msg := companionEnvelopeErrorMessage(envelope); msg != "" {
-			return nil, companionEnvelopeErrorCode(envelope), fmt.Errorf("%s", msg)
-		}
-		return nil, "tool_error", err
-	}
-	if ok, _ := envelope["ok"].(bool); !ok {
-		msg := firstNonEmpty(companionEnvelopeErrorMessage(envelope), "wechat-cli returned ok=false")
-		return nil, companionEnvelopeErrorCode(envelope), fmt.Errorf("%s", msg)
-	}
-	return mapAny(envelope["data"]), "", nil
 }
 
 func companionCLIChildEnv(strictReadOnly bool) []string {
@@ -1959,22 +1917,6 @@ func companionCLIWorkDir() string {
 	return ""
 }
 
-func companionEnvelopeErrorMessage(envelope map[string]any) string {
-	if envelope == nil {
-		return ""
-	}
-	errObj := mapAny(envelope["error"])
-	return stringMapValue(errObj, "message")
-}
-
-func companionEnvelopeErrorCode(envelope map[string]any) string {
-	if envelope == nil {
-		return "tool_error"
-	}
-	errObj := mapAny(envelope["error"])
-	return firstNonEmpty(stringMapValue(errObj, "code"), "tool_error")
-}
-
 func companionCLIMountInfo() companionCLIMount {
 	binary := companionCurrentCLIBinary()
 	command := appName
@@ -2032,10 +1974,6 @@ func companionAskChats(req companionAskRequest) []string {
 		out = append(out, chat)
 	}
 	return out
-}
-
-func companionLoadTimeline(chat string, limit int) (any, string, error) {
-	return companionLoadTimelineWithTrace(chat, limit, nil)
 }
 
 func companionLoadTimelineWithTrace(chat string, limit int, toolCalls *[]companionToolTrace) (any, string, error) {
@@ -3077,15 +3015,6 @@ func companionMediaSummary(msg map[string]any) string {
 		return "[非文本消息]"
 	}
 	return strings.Join(parts, " ")
-}
-
-func companionContextMeta(req companionAskRequest, timeline map[string]any, messages []map[string]any, promptChars int) map[string]any {
-	return companionContextMetaFromContexts(req, []companionChatContext{{
-		Chat:        req.Chat,
-		DisplayName: companionTimelineTitle(timeline, req.Chat),
-		Timeline:    timeline,
-		Messages:    messages,
-	}}, nil, promptChars)
 }
 
 func companionContextMetaFromContexts(req companionAskRequest, contexts []companionChatContext, contextErrors []string, promptChars int) map[string]any {
