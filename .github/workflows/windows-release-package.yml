@@ -13,7 +13,9 @@ on:
 
 jobs:
   package:
-    runs-on: windows-latest
+    # WCDB 2.1.16's release build targets the Visual Studio 2022 generator.
+    # Pin the matching image instead of following windows-latest to VS 2026.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
