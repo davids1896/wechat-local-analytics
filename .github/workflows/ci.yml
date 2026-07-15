@@ -23,6 +23,94 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build -trimpath -o wechat-cli ./cmd/wechat-cli
+      - name: Parse and regress macOS installers
+        if: runner.os == 'macOS'
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          zsh -n install.sh scripts/install-release.sh
+          bash -n scripts/package.sh
+          (
+            source ./scripts/install-release.sh
+            parse_args --dry-run --update
+            [[ "${(j:|:)INSTALL_ARGS}" == "--yes|--dry-run|--update" ]]
+          )
+          checksum_tmp="$(mktemp -d "${RUNNER_TEMP}/wechat-cli-checksum-negative.XXXXXX")"
+          trap 'rm -rf "$checksum_tmp"' EXIT
+          print -rn -- payload > "$checksum_tmp/payload.zip"
+          printf '%064d  payload.zip\n' 0 > "$checksum_tmp/payload.zip.sha256"
+          set +e
+          checksum_output="$(
+            (
+              source ./scripts/install-release.sh
+              verify_sha256 "$checksum_tmp/payload.zip" "$checksum_tmp/payload.zip.sha256"
+            ) 2>&1
+          )"
+          checksum_rc=$?
+          set -e
+          [[ "$checksum_rc" -ne 0 ]]
+          [[ "$checksum_output" == *"sha256 mismatch"* ]]
+          set +e
+          unsafe_output="$(./install.sh --uninstall --dry-run --yes --json --install-dir "$HOME")"
+          unsafe_rc=$?
+          set -e
+          [[ "$unsafe_rc" -ne 0 ]]
+          [[ "$unsafe_output" == *"refusing unsafe install directory"* ]]
+          set +e
+          system_output="$(./install.sh --uninstall --dry-run --yes --json --install-dir /usr/local/bin)"
+          system_rc=$?
+          set -e
+          [[ "$system_rc" -ne 0 ]]
+          [[ "$system_output" == *"refusing unsafe install directory"* ]]
+          set +e
+          version_output="$(WECHAT_CLI_ALLOW_UNTAGGED_PACKAGE=1 ./scripts/package.sh 0.0.0 2>&1)"
+          version_rc=$?
+          set -e
+          [[ "$version_rc" -ne 0 ]]
+          [[ "$version_output" == *"does not match appVersion"* ]]
+          grep -Fq 'WXKEY_RELEASE_TAG="v1.4.8"' scripts/package.sh
+          grep -Fq 'github.com/r266-tech/wxkey/cmd/wxkey@${WXKEY_RELEASE_TAG}' scripts/package.sh
+          forbidden_wxkey_ref='github.com/r266-tech/wxkey/cmd/wxkey@'"latest"
+          ! grep -Fq "$forbidden_wxkey_ref" scripts/package.sh
+          grep -Fq 'WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8' install.sh
+          ! grep -Fq "$forbidden_wxkey_ref" install.sh
+
+          fake_wxkey="$checksum_tmp/fake-wxkey"
+          mkdir -p "$fake_wxkey"
+          git -C "$fake_wxkey" init -q
+          print -r -- fixture > "$fake_wxkey/fixture.txt"
+          git -C "$fake_wxkey" add fixture.txt
+          git -C "$fake_wxkey" -c user.name=CI -c user.email=ci@example.invalid commit -qm fixture
+          git -C "$fake_wxkey" tag v0.0.0
+          fake_wcdb="$checksum_tmp/libWCDB.dylib"
+          : > "$fake_wcdb"
+          source_version="$(sed -nE 's/^[[:space:]]*appVersion[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' cmd/wechat-cli/product.go | head -n 1)"
+          set +e
+          wxkey_tag_output="$(
+            WECHAT_CLI_ALLOW_UNTAGGED_PACKAGE=1 \
+            WECHAT_CLI_WCDB_DYLIB="$fake_wcdb" \
+            WXKEY_SRC="$fake_wxkey" \
+            ./scripts/package.sh "$source_version" 2>&1
+          )"
+          wxkey_tag_rc=$?
+          set -e
+          [[ "$wxkey_tag_rc" -ne 0 ]]
+          [[ "$wxkey_tag_output" == *"exactly at tag v1.4.8"* ]]
+
+          git -C "$fake_wxkey" tag -d v0.0.0 >/dev/null
+          git -C "$fake_wxkey" tag v1.4.8
+          print -r -- dirty >> "$fake_wxkey/fixture.txt"
+          set +e
+          wxkey_dirty_output="$(
+            WECHAT_CLI_ALLOW_UNTAGGED_PACKAGE=1 \
+            WECHAT_CLI_WCDB_DYLIB="$fake_wcdb" \
+            WXKEY_SRC="$fake_wxkey" \
+            ./scripts/package.sh "$source_version" 2>&1
+          )"
+          wxkey_dirty_rc=$?
+          set -e
+          [[ "$wxkey_dirty_rc" -ne 0 ]]
+          [[ "$wxkey_dirty_output" == *"must be clean at tag v1.4.8"* ]]
       - name: Build wechat-cli (Windows)
         if: runner.os == 'Windows'
         env:
@@ -33,7 +121,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          foreach ($script in @(".\install.ps1", ".\scripts\package-windows.ps1", ".\scripts\build-windows-wcdb.ps1")) {
+          foreach ($script in @(".\install.ps1", ".\scripts\install-release.ps1", ".\scripts\package-windows.ps1", ".\scripts\build-windows-wcdb.ps1")) {
             $errors = $null
             [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -LiteralPath $script), [ref]$errors)
             if ($errors -and $errors.Count -gt 0) {
@@ -41,6 +129,89 @@ jobs:
               exit 1
             }
           }
+      - name: Windows installer safety regressions
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          . .\scripts\install-release.ps1
+          $tmp = Join-Path $env:RUNNER_TEMP "wechat-cli-checksum-negative"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $zip = Join-Path $tmp "payload.zip"
+          $sha = Join-Path $tmp "payload.zip.sha256"
+          [IO.File]::WriteAllBytes($zip, [byte[]](1, 2, 3, 4))
+          Set-Content -LiteralPath $sha -Value ("0" * 64) -Encoding ASCII
+          $mismatchFailed = $false
+          try {
+            Test-Sha256 $zip $sha
+          } catch {
+            $mismatchFailed = $_.Exception.Message -match "sha256 mismatch"
+          }
+          if (-not $mismatchFailed) { throw "checksum mismatch did not fail closed" }
+          function Save-Url([string]$Url, [string]$Path) {
+            Set-Content -LiteralPath $Path -Value ("0" * 64) -Encoding ASCII
+          }
+          $integratedMismatchFailed = $false
+          try {
+            Confirm-ReleaseChecksum "mock://release.zip" $zip $sha | Out-Null
+          } catch {
+            $integratedMismatchFailed = $_.Exception.Message -match "sha256 mismatch"
+          }
+          if (-not $integratedMismatchFailed) { throw "release checksum control flow swallowed a mismatch" }
+
+          $unsafe = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -DryRun -Yes -Json -InstallDir $HOME 2>$null
+          if ($LASTEXITCODE -eq 0 -or ($unsafe -join "`n") -notmatch "refusing unsafe install directory") {
+            throw "unsafe uninstall directory was accepted"
+          }
+          $unsafeSystem = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -DryRun -Yes -Json -InstallDir $env:ProgramFiles 2>$null
+          if ($LASTEXITCODE -eq 0 -or ($unsafeSystem -join "`n") -notmatch "refusing unsafe install directory") {
+            throw "Windows system container was accepted as an install directory"
+          }
+
+          $previousErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-wcdb.ps1 -WorkDir $HOME 2>$null
+            $unsafeWorkDirExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+          }
+          if ($unsafeWorkDirExit -eq 0) { throw "unsafe WCDB WorkDir was accepted" }
+
+          $junctionRoot = Join-Path $env:RUNNER_TEMP ("wechat-cli-workdir-junction-negative-" + [Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $junctionRoot | Out-Null
+          $redirect = Join-Path $junctionRoot "redirect"
+          try {
+            New-Item -ItemType Junction -Path $redirect -Target $HOME | Out-Null
+            $unsafeLink = & powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -DryRun -Yes -Json -InstallDir $redirect 2>$null
+            if ($LASTEXITCODE -eq 0 -or ($unsafeLink -join "`n") -notmatch "symlinks or junctions") {
+              throw "junction-backed install directory was accepted"
+            }
+            $nestedWorkDir = Join-Path $redirect "child"
+            $ErrorActionPreference = "Continue"
+            try {
+              & powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows-wcdb.ps1 -WorkDir $nestedWorkDir 2>$null
+              $junctionWorkDirExit = $LASTEXITCODE
+            } finally {
+              $ErrorActionPreference = $previousErrorActionPreference
+            }
+            if ($junctionWorkDirExit -eq 0) { throw "junction-backed WCDB WorkDir was accepted" }
+          } finally {
+            if (Test-Path -LiteralPath $redirect) { [IO.Directory]::Delete($redirect) }
+            Remove-Item -LiteralPath $junctionRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          $versionFailed = $false
+          try {
+            & .\scripts\package-windows.ps1 -Version 0.0.0
+          } catch {
+            $versionFailed = $_.Exception.Message -match "does not match appVersion"
+          }
+          if (-not $versionFailed) { throw "Windows package version mismatch was accepted" }
+          # Expected-failure probes leave a non-zero native LASTEXITCODE even
+          # after their assertions pass; do not leak it as the step result.
+          exit 0
       - name: Windows installer doctor smoke
         if: runner.os == 'Windows'
         shell: powershell

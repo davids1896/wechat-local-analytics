@@ -19,14 +19,14 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "wechat-cli"
 $LegacyAppName = "wx-mcp"
+$InstallMarker = ".wechat-cli-install"
 $SourceDir = $PSScriptRoot
 $local = $env:LOCALAPPDATA
 if ([string]::IsNullOrWhiteSpace($local)) {
   $local = Join-Path $HOME "AppData\Local"
 }
-if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-  $InstallDir = Join-Path $local $AppName
-}
+$DefaultInstallDir = Join-Path $local $AppName
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = $DefaultInstallDir }
 $LegacyInstallDir = Join-Path $local "wx-mcp"
 if ([string]::IsNullOrWhiteSpace($BinDir)) {
   $windowsApps = Join-Path $local "Microsoft\WindowsApps"
@@ -51,6 +51,7 @@ $logDir = Join-Path $InstallDir "logs"
 $log = Join-Path $logDir "install.log"
 $refreshRan = $false
 $asrRan = $false
+$installDirValidated = $false
 $purgeState = [bool]($PurgeState -or $ClearState)
 if ($env:WECHAT_CLI_WITH_ASR -match '^(1|true|yes|on)$') {
   $WithASR = $true
@@ -60,6 +61,104 @@ function Add-Action([string]$s) { $actions.Add($s) | Out-Null }
 function Add-Warning([string]$s) { $warnings.Add($s) | Out-Null }
 function Add-ErrorText([string]$s) { $errors.Add($s) | Out-Null }
 function Have-Command([string]$name) { return $null -ne (Get-Command $name -ErrorAction SilentlyContinue) }
+function Get-NormalizedPath([string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue)) { throw "path must not be empty" }
+  $expanded = [Environment]::ExpandEnvironmentVariables($PathValue)
+  $full = [IO.Path]::GetFullPath($expanded)
+  $root = [IO.Path]::GetPathRoot($full)
+  if ($full -ieq $root) { return $root }
+  return $full.TrimEnd("\")
+}
+function Test-KnownInstallDir([string]$PathValue) {
+  $path = Get-NormalizedPath $PathValue
+  return $path -ieq (Get-NormalizedPath $DefaultInstallDir) -or $path -ieq (Get-NormalizedPath $LegacyInstallDir)
+}
+function Test-ManagedInstallDir([string]$PathValue) {
+  $markerPath = Join-Path $PathValue $InstallMarker
+  if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+    $markerText = [string](Get-Content -LiteralPath $markerPath -Raw -ErrorAction SilentlyContinue)
+    if ($markerText.Trim() -eq "name=$AppName") { return $true }
+  }
+  $hasCli = (Test-Path -LiteralPath (Join-Path $PathValue "$AppName.exe") -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $PathValue "$LegacyAppName.exe") -PathType Leaf)
+  return $hasCli -and
+    (Test-Path -LiteralPath (Join-Path $PathValue "libWCDB.dll") -PathType Leaf) -and
+    (Test-Path -LiteralPath (Join-Path $PathValue "install.ps1") -PathType Leaf)
+}
+function Assert-NoReparseAncestors([string]$PathValue) {
+  $cursor = Get-NormalizedPath $PathValue
+  while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+    if (Test-Path -LiteralPath $cursor) {
+      $item = Get-Item -LiteralPath $cursor -Force
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "install directory and its existing parents must not be symlinks or junctions: $InstallDir"
+      }
+    }
+    $parent = [IO.Path]::GetDirectoryName($cursor)
+    if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ieq $cursor) { break }
+    $cursor = $parent
+  }
+}
+function Assert-SupportedWindowsPlatform {
+  if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw "install.ps1 supports Windows only"
+  }
+  $osArch = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+    $env:PROCESSOR_ARCHITEW6432
+  } else {
+    $env:PROCESSOR_ARCHITECTURE
+  }
+  if (-not [Environment]::Is64BitOperatingSystem -or $osArch -ne "AMD64") {
+    throw "install.ps1 supports Windows amd64 only"
+  }
+}
+function Assert-InstallDirSafety {
+  $path = Get-NormalizedPath $InstallDir
+  Assert-NoReparseAncestors $path
+  $root = [IO.Path]::GetPathRoot($path)
+  $dangerous = @(
+    $root,
+    (Get-NormalizedPath $HOME),
+    (Get-NormalizedPath $local),
+    (Get-NormalizedPath $SourceDir),
+    (Get-NormalizedPath $BinDir),
+    (Get-NormalizedPath (Join-Path $HOME ".local")),
+    (Get-NormalizedPath (Join-Path $HOME ".local\bin")),
+    (Get-NormalizedPath (Join-Path $HOME "Documents")),
+    (Get-NormalizedPath (Join-Path $HOME "Desktop"))
+  )
+  foreach ($candidate in @(
+    $env:SystemRoot,
+    $env:ProgramFiles,
+    ${env:ProgramFiles(x86)},
+    $env:ProgramW6432,
+    $env:ProgramData,
+    $env:TEMP,
+    $env:TMP,
+    (Join-Path $HOME "AppData"),
+    (Join-Path $HOME "AppData\Roaming"),
+    (Join-Path $HOME "Downloads")
+  )) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+      $dangerous += Get-NormalizedPath $candidate
+    }
+  }
+  if (($dangerous | Where-Object { $path -ieq $_ }).Count -gt 0) {
+    throw "refusing unsafe install directory: $InstallDir"
+  }
+
+  if ($script:mode -in @("install", "update")) {
+    Assert-SupportedWindowsPlatform
+    if ((Test-Path -LiteralPath $path -PathType Container) -and -not (Test-KnownInstallDir $path) -and -not (Test-ManagedInstallDir $path)) {
+      $first = Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($null -ne $first) {
+        throw "refusing to install into non-empty unrecognized directory: $InstallDir"
+      }
+    }
+  } elseif ($script:mode -eq "uninstall" -and (Test-Path -LiteralPath $path) -and -not (Test-KnownInstallDir $path) -and -not (Test-ManagedInstallDir $path)) {
+    throw "refusing to uninstall unrecognized directory without $InstallMarker or a complete legacy install: $InstallDir"
+  }
+}
 function Write-Log([string]$text) {
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
   Add-Content -Path $log -Value ("[{0}] {1}" -f ([DateTime]::UtcNow.ToString("o")), $text)
@@ -243,6 +342,7 @@ function Install-Components {
   }
 
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  Set-Content -LiteralPath (Join-Path $InstallDir $InstallMarker) -Value "name=$AppName" -Encoding ASCII
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
   $wx = $components.Wx
@@ -487,6 +587,11 @@ try {
     throw "-PurgeState is only valid with -Uninstall; use -ClearState to remove state without uninstalling"
   }
 
+  if ($mode -in @("install", "update", "uninstall")) {
+    Assert-InstallDirSafety
+    $installDirValidated = $true
+  }
+
   if ($Doctor) {
     Run-Doctor
     Finish 0
@@ -545,6 +650,8 @@ try {
     $nextAction = "Fix the reported error and rerun install.ps1 -All -Yes -Json."
   }
   Add-ErrorText $_.Exception.Message
-  Write-Log $_.Exception.Message
+  if ($installDirValidated) {
+    try { Write-Log $_.Exception.Message } catch { }
+  }
   Finish 1
 }

@@ -787,6 +787,67 @@ func TestParseUpdateArgsRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestReleaseInstallerArgsPreserveInstallDir(t *testing.T) {
+	got := releaseInstallerArgs(updateOptions{
+		DryRun:     true,
+		InstallDir: filepath.Join("", "custom", "wechat-cli"),
+	})
+	joined := strings.Join(got, "\x00")
+	if !strings.Contains(joined, "--install-dir\x00"+filepath.Join("", "custom", "wechat-cli")) {
+		t.Fatalf("releaseInstallerArgs did not preserve install dir: %#v", got)
+	}
+}
+
+func TestInstallDirFromExecutableCleansPath(t *testing.T) {
+	root := t.TempDir()
+	exe := filepath.Join(root, "bin", "..", "bin", executableNameForTest())
+	got, err := installDirFromExecutable(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "bin")
+	if got != want {
+		t.Fatalf("installDirFromExecutable = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsReleaseUpdateScriptPreservesInstallDir(t *testing.T) {
+	for _, needle := range []string{
+		`[string]$InstallDir = ""`,
+		`@("-InstallDir", $InstallDir)`,
+	} {
+		if !strings.Contains(windowsReleaseUpdateScript, needle) {
+			t.Fatalf("windows updater script missing %q", needle)
+		}
+	}
+}
+
+func TestReleaseBootstrapURLsUseLatestReleaseAssets(t *testing.T) {
+	want := map[string]string{
+		"shell":      "https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh",
+		"powershell": "https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1",
+	}
+	got := map[string]string{
+		"shell":      releaseInstallShellURL,
+		"powershell": releaseInstallPowerShellURL,
+	}
+	for platform, wantURL := range want {
+		if got[platform] != wantURL {
+			t.Fatalf("%s bootstrap URL = %q, want %q", platform, got[platform], wantURL)
+		}
+		if strings.Contains(got[platform], "/main/") || strings.Contains(got[platform], "raw.githubusercontent.com") {
+			t.Fatalf("%s bootstrap still uses mutable main content: %q", platform, got[platform])
+		}
+	}
+}
+
+func executableNameForTest() string {
+	if runtime.GOOS == "windows" {
+		return "wechat-cli.exe"
+	}
+	return "wechat-cli"
+}
+
 func TestBoolKVFlagsDoNotConsumePositionals(t *testing.T) {
 	args := []string{"--include-debug", "某群"}
 	got := parseKVFlags(args)
@@ -2435,6 +2496,18 @@ func TestMergeRuntimeKeyConfigKeepsExistingKeys(t *testing.T) {
 	}
 }
 
+func TestRequireSameConfigAccountRejectsRefreshRace(t *testing.T) {
+	expected := &config.Config{DBRoot: filepath.Join(t.TempDir(), "account-a"), Wxid: "wxid_a"}
+	current := &config.Config{DBRoot: filepath.Join(t.TempDir(), "account-b"), Wxid: "wxid_b"}
+	if err := requireSameConfigAccount(expected, current); err == nil {
+		t.Fatal("account switch during key refresh was accepted")
+	}
+	current = &config.Config{DBRoot: expected.DBRoot, Wxid: expected.Wxid}
+	if err := requireSameConfigAccount(expected, current); err != nil {
+		t.Fatalf("same account rejected: %v", err)
+	}
+}
+
 func TestCriticalCacheSourceClassification(t *testing.T) {
 	for _, rel := range []string{"contact/contact.db", "session/session.db"} {
 		if !isCriticalCacheSource(rel) {
@@ -3243,12 +3316,31 @@ func TestBoundedReadSQL(t *testing.T) {
 	if got != want {
 		t.Fatalf("boundedReadSQL = %q, want %q", got, want)
 	}
+	got, err = boundedReadSQLPage("SELECT id FROM t ORDER BY id DESC", 11, 20)
+	if err != nil {
+		t.Fatalf("boundedReadSQLPage returned error: %v", err)
+	}
+	if want := "SELECT * FROM (SELECT id FROM t ORDER BY id DESC) LIMIT 11 OFFSET 20"; got != want {
+		t.Fatalf("boundedReadSQLPage = %q, want %q", got, want)
+	}
 
 	if _, err := boundedReadSQL("DELETE FROM t", 10); err == nil {
 		t.Fatalf("boundedReadSQL should reject writes")
 	}
 	if _, err := boundedReadSQL("SELECT 1; SELECT 2", 10); err == nil {
 		t.Fatalf("boundedReadSQL should reject multiple statements")
+	}
+}
+
+func TestSliceDiagnosticSQLRowsPagesWithoutOverlap(t *testing.T) {
+	rows := []wcdb.Row{{"id": int64(0)}, {"id": int64(1)}, {"id": int64(2)}, {"id": int64(3)}}
+	page0 := sliceDiagnosticSQLRows(rows, 0, 3)
+	page1 := sliceDiagnosticSQLRows(rows, 2, 3)
+	if len(page0) != 3 || rowInt64(page0[0], "id") != 0 || rowInt64(page0[2], "id") != 2 {
+		t.Fatalf("page0 = %#v", page0)
+	}
+	if len(page1) != 2 || rowInt64(page1[0], "id") != 2 || rowInt64(page1[1], "id") != 3 {
+		t.Fatalf("page1 = %#v", page1)
 	}
 }
 

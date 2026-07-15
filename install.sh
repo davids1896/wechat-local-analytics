@@ -6,8 +6,10 @@ LEGACY_APP_NAME="wx-mcp"
 WATCHER_LABEL="com.r266.wechat-cli-cache-watcher"
 LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
 SOURCE_DIR="${0:A:h}"
-INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-$HOME/.local/share/wechat-cli}"
+DEFAULT_INSTALL_DIR="$HOME/.local/share/wechat-cli"
+INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 LEGACY_INSTALL_DIR="$HOME/.local/share/wx-mcp"
+INSTALL_MARKER=".wechat-cli-install"
 BIN_DIR="${WECHAT_CLI_BIN_DIR:-$HOME/.local/bin}"
 SHIM_PATH="$BIN_DIR/$APP_NAME"
 LOG_DIR="${WECHAT_CLI_LOG_DIR:-$HOME/Library/Logs/wechat-cli}"
@@ -105,7 +107,7 @@ Environment:
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
   WXKEY_GO_INSTALL          Go package/version for source fallback
-                            (default github.com/r266-tech/wxkey/cmd/wxkey@latest).
+                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8).
 EOF
 }
 
@@ -389,6 +391,60 @@ expand_path() {
   print -r -- "$p"
 }
 
+canonical_path() {
+  local p="$1"
+  [[ -n "$p" ]] || return 1
+  p="${p/#\~/$HOME}"
+  print -r -- "${p:A}"
+}
+
+install_dir_is_known() {
+  local resolved="$1"
+  [[ "$resolved" == "$(canonical_path "$DEFAULT_INSTALL_DIR")" || "$resolved" == "$(canonical_path "$LEGACY_INSTALL_DIR")" ]]
+}
+
+install_dir_looks_managed() {
+  local resolved="$1"
+  if [[ -f "$resolved/$INSTALL_MARKER" ]] && [[ "$(head -n 1 "$resolved/$INSTALL_MARKER" 2>/dev/null)" == "name=$APP_NAME" ]]; then
+    return 0
+  fi
+  [[ -f "$resolved/$APP_NAME" || -f "$resolved/$LEGACY_APP_NAME" ]] &&
+    [[ -f "$resolved/wxkey" ]] &&
+    [[ -f "$resolved/libWCDB.dylib" ]]
+}
+
+validate_install_dir_safety() {
+  local resolved home source bin
+  resolved="$(canonical_path "$INSTALL_DIR")" || die "install directory must not be empty" 2
+  home="$(canonical_path "$HOME")"
+  source="$(canonical_path "$SOURCE_DIR")"
+  bin="$(canonical_path "$BIN_DIR")"
+
+  case "$resolved" in
+    /|/Applications|/Library|/System|/Users|/bin|/sbin|/usr|/usr/bin|/usr/sbin|/usr/lib|/usr/libexec|/usr/share|\
+    /usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/lib|/opt|/opt/homebrew|/opt/homebrew/bin|/opt/homebrew/sbin|\
+    /private|/private/tmp|/private/var|/private/var/tmp|/tmp|/var|\
+    "$home"|"$home/bin"|"$home/Desktop"|"$home/Documents"|"$home/Downloads"|"$home/Applications"|\
+    "$home/.local"|"$home/.local/bin"|"$home/.local/share"|"$home/.config"|"$home/.cache"|\
+    "$home/Library"|"$home/Library/Application Support"|"$home/Library/Logs"|\
+    "$source"|"$bin")
+      die "refusing unsafe install directory: $INSTALL_DIR" 2
+      ;;
+  esac
+
+  if [[ "$MODE" == "install" || "$MODE" == "update" ]]; then
+    [[ "$(uname -s)" == "Darwin" ]] || die "install.sh supports macOS only" 2
+    [[ "$(uname -m)" == "arm64" ]] || die "install.sh supports macOS arm64 only" 2
+    if [[ -d "$resolved" ]] && ! install_dir_is_known "$resolved" && ! install_dir_looks_managed "$resolved"; then
+      local first_entry
+      first_entry="$(find "$resolved" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+      [[ -z "$first_entry" ]] || die "refusing to install into non-empty unrecognized directory: $INSTALL_DIR" 2
+    fi
+  elif [[ "$MODE" == "uninstall" && -e "$resolved" ]] && ! install_dir_is_known "$resolved" && ! install_dir_looks_managed "$resolved"; then
+    die "refusing to uninstall unrecognized directory without $INSTALL_MARKER or a complete legacy install: $INSTALL_DIR" 2
+  fi
+}
+
 parse_args() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -574,7 +630,7 @@ resolve_components() {
     WXKEY_SOURCE="$SOURCE_DIR/../wxkey/wxkey"
   elif have_cmd go; then
     WXKEY_MODE="go-install"
-    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@latest}"
+    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8}"
   elif have_cmd wxkey; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$(command -v wxkey)"
@@ -609,6 +665,7 @@ install_components() {
   fi
 
   mkdir -p "$INSTALL_DIR"
+  print -r -- "name=$APP_NAME" > "$INSTALL_DIR/$INSTALL_MARKER" || die "write install marker failed" 1
 
   if [[ "$CLI_MODE" == "build" ]]; then
     build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$INSTALL_DIR/$APP_NAME" "$APP_NAME"
@@ -1050,6 +1107,12 @@ main() {
   LOG_DIR="$(expand_path "$LOG_DIR")"
   INSTALL_LOG="$LOG_DIR/install.log"
   PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
+
+  case "$MODE" in
+    install|update|uninstall)
+      validate_install_dir_safety
+      ;;
+  esac
 
   case "$MODE" in
     doctor)

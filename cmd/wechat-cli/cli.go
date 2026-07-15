@@ -71,7 +71,7 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "asr setup", Usage: appName + " asr setup [--dry-run] [--model large-v3] [--skip-model-download]", Description: "Create the wechat-cli ASR virtualenv, install faster-whisper, and optionally preload the default model.", Examples: []string{appName + " asr setup --dry-run --pretty", appName + " asr setup --model large-v3", appName + " asr setup --skip-model-download"}},
 	{Command: "companion", Aliases: []string{"sidecar"}, Usage: appName + " companion [--addr 127.0.0.1:18789] [--desktop=false|--browser|--open=false]", Description: "Start the read-only local WeChat Assistant V1 sidecar GUI. On macOS it opens a native WebKit desktop window by default.", Examples: []string{appName + " companion", appName + " companion --browser", appName + " companion --addr 127.0.0.1:18789 --open=false"}},
 	{Command: "call", Usage: appName + " call <command-or-tool> [--key value ...]", Description: "Call a command/tool with key/value CLI arguments.", Examples: []string{appName + ` call timeline --chat "$CHAT" --limit 20`}},
-	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <command-or-tool> '<json args>'", Description: "Call a command/tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json timeline '{"chat":"$CHAT","limit":20}'`, appName + ` call-json search-context '{"keyword":"$KEYWORD","limit":5}'`}},
+	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <command-or-tool> '<json args>'", Description: "Call a command/tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json timeline "{\"chat\":\"$CHAT\",\"limit\":20}"`, appName + ` call-json search-context "{\"keyword\":\"$KEYWORD\",\"limit\":5}"`}},
 	{Command: "tool-schema", Aliases: []string{"describe", "describe-tool", "tool_schema"}, Usage: appName + " tool-schema <command-or-tool>", Description: "Return one command/tool schema.", Examples: []string{appName + " tool-schema timeline"}},
 	{Command: "cache", Usage: appName + " cache <status|refresh|rebuild>", Description: "Metadata cache subcommands.", Examples: []string{appName + " cache status"}},
 	{Command: "cache status", Tool: "cache_status", Usage: appName + " cache status", Examples: []string{appName + " cache status"}},
@@ -369,13 +369,84 @@ func runToolJSONCLI(args []string, opts cliOptions) {
 		}
 		raw = string(data)
 	}
-	flags := map[string]any{}
-	if strings.TrimSpace(raw) != "" {
-		if err := json.Unmarshal([]byte(raw), &flags); err != nil {
-			exitCLIError(opts, 1, "invalid_json", "invalid json args: "+err.Error(), name, "call-json")
-		}
+	flags, err := decodeCLIJSONArgs(raw)
+	if err != nil {
+		exitCLIError(opts, 1, "invalid_json", "invalid json args: "+err.Error(), name, "call-json")
 	}
 	runToolCLI(name, flags, opts, "call-json")
+}
+
+func decodeCLIJSONArgs(raw string) (map[string]any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var flags map[string]any
+	if err := dec.Decode(&flags); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return nil, err
+	}
+	if flags == nil {
+		flags = map[string]any{}
+	}
+	for key, value := range flags {
+		normalized, err := normalizeCLIJSONValue(value)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		flags[key] = normalized
+	}
+	return flags, nil
+}
+
+func normalizeCLIJSONValue(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		if n, err := strconv.ParseInt(value.String(), 10, 64); err == nil {
+			return n, nil
+		}
+		// Tool schemas expose integers, not arbitrary JSON numbers. Preserve
+		// compatibility with integral forms such as 1.0/1e3 only inside the JSON
+		// safe-integer range; larger IDs must be written as ordinary integer
+		// tokens (handled exactly above) or supplied through the *_str fields.
+		f, err := strconv.ParseFloat(value.String(), 64)
+		const maxSafeJSONInteger = float64(1<<53 - 1)
+		if err != nil || f < -maxSafeJSONInteger || f > maxSafeJSONInteger {
+			return nil, fmt.Errorf("number %q is outside the safe integer range", value.String())
+		}
+		n := int64(f)
+		if f != float64(n) {
+			return nil, fmt.Errorf("number %q is not an integer", value.String())
+		}
+		return n, nil
+	case map[string]any:
+		for key, item := range value {
+			normalized, err := normalizeCLIJSONValue(item)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", key, err)
+			}
+			value[key] = normalized
+		}
+		return value, nil
+	case []any:
+		for i, item := range value {
+			normalized, err := normalizeCLIJSONValue(item)
+			if err != nil {
+				return nil, fmt.Errorf("item %d: %w", i, err)
+			}
+			value[i] = normalized
+		}
+		return value, nil
+	default:
+		return value, nil
+	}
 }
 
 func callableToolNameForTarget(target string) (string, bool) {
@@ -437,6 +508,8 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 	if err := validateToolArgs(name, flags); err != nil {
 		return nil, cliErrorCode(err), err
 	}
+	responseArgs := cliToolResponseArgs(name, flags)
+	flags = cliToolFetchArgs(name, responseArgs)
 	srv := &server{}
 	var result any
 	var err error
@@ -505,7 +578,45 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 	if err != nil {
 		return nil, "tool_error", err
 	}
-	return cliAgentDataEnvelope(name, command, flags, result), "", nil
+	return cliAgentDataEnvelope(name, command, responseArgs, result), "", nil
+}
+
+func cliToolFetchArgs(tool string, args map[string]any) map[string]any {
+	limit := getInt(args, "limit", 0)
+	if limit <= 0 || cliResultListKey(tool) == "" {
+		return args
+	}
+	if tool == "messages" && getStr(args, "view") == "agent" {
+		return args
+	}
+	out := copyToolArgs(args)
+	out["limit"] = int64(limit + 1)
+	return out
+}
+
+func cliToolResponseArgs(tool string, args map[string]any) map[string]any {
+	out := copyToolArgs(args)
+	if getInt(out, "limit", 0) <= 0 {
+		if limit := cliToolDefaultLimit(tool); limit > 0 {
+			out["limit"] = int64(limit)
+		}
+	}
+	return out
+}
+
+func cliToolDefaultLimit(tool string) int {
+	switch tool {
+	case "sessions", "contacts", "messages", "media_resources", "favorites", "red_packets", "transfers", "sns_notifications", "forward_history", "unread":
+		return 50
+	case "search", "sns_feed", "sns_search", "chatroom_announcements":
+		return 20
+	case "group_members":
+		return 100
+	case "sql":
+		return 200
+	default:
+		return 0
+	}
 }
 
 func runTailCLI(flags map[string]any, opts cliOptions, command string) {
@@ -548,6 +659,14 @@ func writeReadEventsJSONL(enc *json.Encoder, env map[string]any) error {
 	return nil
 }
 
+// cliRowsResult carries row-oriented tool output plus source diagnostics without
+// exposing an ad-hoc map shape to internal callers that still need the raw rows.
+type cliRowsResult struct {
+	Rows      []wcdb.Row
+	Freshness map[string]any
+	Warnings  []string
+}
+
 func cliAgentDataEnvelope(tool, command string, args map[string]any, result any) any {
 	if _, ok := result.(map[string]any); ok {
 		return result
@@ -560,16 +679,37 @@ func cliAgentDataEnvelope(tool, command string, args map[string]any, result any)
 	if !ok {
 		return result
 	}
-	return compactMap(map[string]any{
-		"query":     cliResultQueryMeta(tool, command, args, rows),
-		"freshness": cliResultFreshnessMeta(tool),
-		listKey:     cliResultRowsForTool(tool, args, rows),
+	freshness, warnings := cliRowsResultMetadata(result)
+	if freshness == nil {
+		freshness = cliResultFreshnessMeta(tool)
+	}
+	query := cliResultQueryMeta(tool, command, args, rows)
+	if complete, ok := freshness["complete"].(bool); ok && !complete {
+		delete(query, "has_more")
+		delete(query, "next_offset")
+		query["has_more_unknown"] = true
+	}
+	limit := getInt(args, "limit", 0)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	out := compactMap(map[string]any{
+		"query":     query,
+		"freshness": freshness,
+		"warnings":  warnings,
 	})
+	// A stable empty list is part of the CLI contract; compactMap intentionally
+	// removes empty slices, so assign the list key after compaction.
+	out[listKey] = cliResultRowsForTool(tool, args, rows)
+	return out
 }
 
 func cliResultRows(result any) ([]map[string]any, bool) {
 	switch rows := result.(type) {
 	case []map[string]any:
+		if rows == nil {
+			rows = make([]map[string]any, 0)
+		}
 		return rows, true
 	case []wcdb.Row:
 		out := make([]map[string]any, 0, len(rows))
@@ -577,9 +717,42 @@ func cliResultRows(result any) ([]map[string]any, bool) {
 			out = append(out, map[string]any(row))
 		}
 		return out, true
+	case []*snsPost:
+		out := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			data, err := json.Marshal(row)
+			if err != nil {
+				return nil, false
+			}
+			var mapped map[string]any
+			if err := json.Unmarshal(data, &mapped); err != nil {
+				return nil, false
+			}
+			out = append(out, mapped)
+		}
+		return out, true
+	case cliRowsResult:
+		return cliResultRows(rows.Rows)
+	case *cliRowsResult:
+		if rows == nil {
+			return make([]map[string]any, 0), true
+		}
+		return cliResultRows(rows.Rows)
 	default:
 		return nil, false
 	}
+}
+
+func cliRowsResultMetadata(result any) (map[string]any, []string) {
+	switch result := result.(type) {
+	case cliRowsResult:
+		return result.Freshness, append([]string(nil), result.Warnings...)
+	case *cliRowsResult:
+		if result != nil {
+			return result.Freshness, append([]string(nil), result.Warnings...)
+		}
+	}
+	return nil, nil
 }
 
 func cliResultRowsForTool(tool string, args map[string]any, rows []map[string]any) []map[string]any {
@@ -595,11 +768,35 @@ func cliResultRowsForTool(tool string, args map[string]any, rows []map[string]an
 
 func cliResultFreshnessMeta(tool string) map[string]any {
 	switch tool {
+	case "contacts", "group_members", "chatroom_announcements":
+		return map[string]any{"message_source": "live_contact_db"}
 	case "media_resources":
 		return map[string]any{
 			"message_source":      "live_message_resource_db",
 			"metadata_cache_role": "chat/sender display names only",
 		}
+	case "favorites":
+		return map[string]any{
+			"message_source":      "live_favorite_db",
+			"metadata_cache_role": "display names only",
+		}
+	case "red_packets", "transfers":
+		return map[string]any{
+			"message_source":      "live_general_db",
+			"message_enrichment":  "live_message_db_best_effort",
+			"metadata_cache_role": "chat/sender display names only",
+		}
+	case "sns_feed", "sns_search", "sns_notifications":
+		return map[string]any{"message_source": "live_sns_db"}
+	case "forward_history":
+		return map[string]any{
+			"message_source":      "live_general_db",
+			"metadata_cache_role": "display names only",
+		}
+	case "sql":
+		return map[string]any{"message_source": "live_selected_db_read_only"}
+	case "schema":
+		return map[string]any{"message_source": "live_db_schema"}
 	}
 	return nil
 }
@@ -755,6 +952,12 @@ func cliResultListKey(tool string) string {
 func cliResultQueryMeta(tool, command string, args map[string]any, rows []map[string]any) map[string]any {
 	limit := getInt(args, "limit", 0)
 	offset := getInt(args, "offset", 0)
+	returned := len(rows)
+	hasMore := false
+	if limit > 0 && returned > limit {
+		returned = limit
+		hasMore = true
+	}
 	meta := compactMap(map[string]any{
 		"tool":        tool,
 		"command":     command,
@@ -767,14 +970,19 @@ func cliResultQueryMeta(tool, command string, args map[string]any, rows []map[st
 		"before":      getStr(args, "before"),
 		"limit":       limit,
 		"offset":      offset,
-		"returned":    len(rows),
-		"has_more":    false,
+		"returned":    returned,
+		"has_more":    hasMore,
 		"next_offset": 0,
 	})
+	meta["returned"] = returned
+	meta["has_more"] = hasMore
 	if limit > 0 {
-		meta["has_more"] = len(rows) >= limit
-		if len(rows) >= limit {
-			meta["next_offset"] = offset + len(rows)
+		meta["limit"] = limit
+		meta["offset"] = offset
+		if hasMore {
+			meta["next_offset"] = offset + returned
+		} else {
+			delete(meta, "next_offset")
 		}
 	} else {
 		delete(meta, "limit")

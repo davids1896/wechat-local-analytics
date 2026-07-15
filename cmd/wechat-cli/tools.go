@@ -269,6 +269,7 @@ var toolDefs = []toolDef{
 			"display_name / nick_name / remark / alias (大小写无关, 空格无关).",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
+			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"type_filter": strProp("all (默认) / private / group / official_account / folded / bot, 可逗号分隔"),
 			"keyword":     strProp("模糊搜索"),
 		}, nil),
@@ -295,6 +296,7 @@ var toolDefs = []toolDef{
 		InputSchema: jsonSchema(props{
 			"keyword":      strProp("模糊搜索 (匹配 wxid/昵称/备注/alias/拼音首字母)"),
 			"limit":        intProp("返回条数 (默认 50)"),
+			"offset":       intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"groups_only":  boolProp("仅返回群"),
 			"friends_only": boolProp("仅返回好友 (排除群和公众号)"),
 		}, nil),
@@ -302,7 +304,7 @@ var toolDefs = []toolDef{
 	{
 		Name: "messages",
 		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wechat-cli 用 metadata cache 自动解析. " +
-			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/offset/has_more/next_offset, 用于可靠分页爬全量. messages[] 是低噪声 timeline 行: id(local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / is_from_me / kind / text / warnings, " +
+			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/has_more 与 cursor.next_before_message/next_after_message, 用于稳定分页. messages[] 是低噪声 timeline 行: id(local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / is_from_me / kind / text / warnings, " +
 			"并为非文本消息提供 display-ready 结构: images / videos / files / link / music / miniprogram / forward_chat / quote / transfer / red_packet / location / card / voice / video / sticker / solitaire / announcement / pat. " +
 			"默认遵循微信 UI 可见语义: 图片/视频/文件给 agent 可直接读取的本机 path, 语音默认优先用 faster-whisper large-v3 返回本地 ASR transcript, raw SILK、不可读 .dat、CDN/aeskey、协议码和 raw XML 下沉到 debug/full/media_resources; 引用消息会扁平到 quote 并复用原消息可见 payload; 合并转发 item 使用 source_id 统一关联原消息, 媒体无法解析时给明确 warnings; 链接直接给 title/url/source/thumb_url. " +
 			"fields=lite (默认) 返回: local_id / server_id / server_id_str / create_time / create_time_human / " +
@@ -363,7 +365,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "chat_timeline",
-		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; query 含 returned/limit/offset/has_more/next_offset 便于可靠分页爬全量; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
+		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; 翻旧消息优先复用 query.cursor.next_before_message, 避免实时新增消息使 offset 漂移; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
 		InputSchema: jsonSchema(props{
 			"talker":                       strProp("会话对象 (wxid 或 xxx@chatroom)"),
 			"chat":                         strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
@@ -444,7 +446,7 @@ var toolDefs = []toolDef{
 			"mode":                enumStrProp("auto (默认) / messages / sessions", "auto", "messages", "sessions"),
 			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom; 存在时观察该会话新消息"),
 			"chat":                strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
-			"cursor":              strProp("上次返回的 cursor; message 形如 local_id:123, session 形如 session:1780560000"),
+			"cursor":              strProp("上次返回的 cursor; message 形如 local_id:123, session cursor 为不透明的 session:<timestamp>[:tie-break]"),
 			"since_local_id":      intProp("首次观察某会话时的 local_id 游标; 等价 after_message"),
 			"since_time":          strProp("首次观察时的起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"since":               strProp("since_time 的别名"),
@@ -454,7 +456,7 @@ var toolDefs = []toolDef{
 			"sender":              strProp("可选: sender wxid/昵称; 可传 me/self 表示自己"),
 			"from_me":             boolProp("仅返回自己发出的 message events; 等价 sender=me"),
 			"limit":               intPropBounds("返回事件条数 (默认 50, 最大 1000)", 1, 1000),
-			"scan_limit":          intPropBounds("mode=sessions 时内部扫描会话条数 (默认等于 limit, 最大 5000)", 1, 5000),
+			"scan_limit":          intPropBounds("mode=sessions 时内部扫描会话条数 (默认 5000, 最大 5000); 截断时不推进游标并返回 warning", 1, 5000),
 			"include_media_paths": boolProp("message events 是否补齐图片/视频/文件路径 (默认 true)"),
 			"include_debug":       boolProp("是否附带 debug 节点 (默认 false)"),
 			"debug":               boolProp("include_debug 的别名"),
@@ -557,6 +559,7 @@ var toolDefs = []toolDef{
 			"after":        strProp("起始时间 (unix秒 或 2006-01-02)"),
 			"before":       strProp("截止时间 (unix秒 或 2006-01-02)"),
 			"limit":        intProp("返回条数 (默认 50)"),
+			"offset":       intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 		}, nil),
 	},
 	{
@@ -626,6 +629,7 @@ var toolDefs = []toolDef{
 			"subdir": strProp("db_storage 下的子目录 (默认 session)"),
 			"file":   strProp("数据库文件名 (默认 session.db)"),
 			"limit":  intProp("SELECT/WITH 外层最大返回行数 (默认 200, 最大 1000)"),
+			"offset": intPropBounds("SELECT/WITH 外层跳过行数 (默认 0)", 0, 1000000),
 		}, []string{"query"}),
 	},
 	{
@@ -638,6 +642,7 @@ var toolDefs = []toolDef{
 			"after/before 按 begin_transfer_time 过滤, 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
+			"offset": intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"after":  strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"before": strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
 		}, nil),
@@ -651,6 +656,7 @@ var toolDefs = []toolDef{
 			"不传 after/before 时按 rowid DESC (近似收到顺序); 传时间过滤时 live join 对应 Msg_<hash> 取 create_time.",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
+			"offset": intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"talker": strProp("可选: 限定会话对象"),
 			"chat":   strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
 			"sender": strProp("可选: sender wxid 或昵称"),
@@ -667,6 +673,7 @@ var toolDefs = []toolDef{
 			"after/before 按 update_time 过滤, 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
+			"offset": intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"after":  strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"before": strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
 		}, nil),
@@ -680,6 +687,7 @@ var toolDefs = []toolDef{
 		InputSchema: jsonSchema(props{
 			"chatroom_id": strProp("群 ID (xxx@chatroom), 不传则返回所有群公告 (按发布时间倒序)"),
 			"limit":       intProp("返回条数 (默认 20)"),
+			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"after":       strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"before":      strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
 		}, nil),
@@ -691,6 +699,7 @@ var toolDefs = []toolDef{
 			"after/before 按 forward_time 过滤, 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
 			"limit":  intProp("返回条数 (默认 50)"),
+			"offset": intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"after":  strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"before": strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
 		}, nil),
@@ -728,6 +737,7 @@ var toolDefs = []toolDef{
 		Description: "未读会话列表. metadata cache-backed; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
+			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),
 			"type_filter": strProp("all/private/group/official_account/folded/bot, 可逗号分隔"),
 			"filter":      strProp("type_filter 的别名, 兼容 wx-cli 风格"),
 		}, nil),

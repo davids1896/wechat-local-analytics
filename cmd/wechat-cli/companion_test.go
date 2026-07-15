@@ -9,38 +9,28 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-func companionTestToken(t *testing.T, handler http.Handler) string {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("index status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	marker := `const COMPANION_TOKEN = "`
-	start := strings.Index(rec.Body.String(), marker)
-	if start < 0 {
-		t.Fatalf("index missing companion token")
-	}
-	start += len(marker)
-	end := strings.Index(rec.Body.String()[start:], `"`)
-	if end < 0 {
-		t.Fatalf("unterminated companion token")
-	}
-	return rec.Body.String()[start : start+end]
+func companionTestHandler(allowRemote bool) (http.Handler, string) {
+	token := strings.Repeat("a1", 32)
+	return newCompanionHandler(token, allowRemote), token
 }
 
 func companionAuthorizeTestRequest(req *http.Request, token string) {
 	req.Host = "127.0.0.1"
 	req.Header.Set("X-Wechat-Companion-Token", token)
 	req.Header.Set("Origin", "http://"+req.Host)
+}
+
+func companionAuthorizeTestCookie(req *http.Request, token string) {
+	req.AddCookie(&http.Cookie{Name: companionSessionCookieName, Value: companionSessionToken(token)})
 }
 
 func companionUseTestCPU(t *testing.T, runner companionCPURunnerFunc) {
@@ -579,6 +569,7 @@ func TestCompanionAskChatsDedupes(t *testing.T) {
 func TestCompanionCLIChildEnvWhitelistsLaunchdServiceEnv(t *testing.T) {
 	dbRoot := filepath.Join(t.TempDir(), "db")
 	t.Setenv("WECHAT_CLI_DB_ROOT", dbRoot)
+	t.Setenv("WECHAT_CLI_COMPANION_TOKEN", strings.Repeat("secret", 8))
 	t.Setenv("WXKEY_TEST_OPTION", "1")
 	t.Setenv("XPC_SERVICE_NAME", "com.r266.wechat-cli-companion")
 	t.Setenv("XPC_FLAGS", "1")
@@ -595,6 +586,9 @@ func TestCompanionCLIChildEnvWhitelistsLaunchdServiceEnv(t *testing.T) {
 	}
 	if _, ok := companionTestEnvValue(env, "XPC_FLAGS"); ok {
 		t.Fatalf("launchd flags should not be inherited: %#v", env)
+	}
+	if _, ok := companionTestEnvValue(env, "WECHAT_CLI_COMPANION_TOKEN"); ok {
+		t.Fatalf("companion bearer token should not be inherited by child tools: %#v", env)
 	}
 	if value, ok := companionTestEnvValue(env, "WECHAT_CLI_STRICT_READ_ONLY"); !ok || value != "1" {
 		t.Fatalf("strict read-only not set in env: %#v", env)
@@ -704,8 +698,17 @@ func TestCompanionCLIMountEnvMountsCurrentCLI(t *testing.T) {
 }
 
 func TestCompanionAPIGuardRequiresPageToken(t *testing.T) {
-	handler := newCompanionHandler()
-	token := companionTestToken(t, handler)
+	handler, token := companionTestHandler(false)
+
+	indexReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRec := httptest.NewRecorder()
+	handler.ServeHTTP(indexRec, indexReq)
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, body=%s", indexRec.Code, indexRec.Body.String())
+	}
+	if strings.Contains(indexRec.Body.String(), token) {
+		t.Fatalf("unauthenticated index leaked bearer token")
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	req.Host = "127.0.0.1"
@@ -713,6 +716,13 @@ func TestCompanionAPIGuardRequiresPageToken(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("missing token status = %d", rec.Code)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/status?token="+token, nil)
+	req.Host = "127.0.0.1"
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("query bearer token should be rejected, status = %d", rec.Code)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
@@ -732,13 +742,104 @@ func TestCompanionAPIGuardRequiresPageToken(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("plain post status = %d", rec.Code)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "companion.example:18789"
+	req.Header.Set("Origin", "https://"+req.Host)
+	req.Header.Set("X-Wechat-Companion-Token", token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("loopback handler accepted remote host: %d", rec.Code)
+	}
+}
+
+func TestCompanionRemoteHandlerRequiresBearerToken(t *testing.T) {
+	handler, token := companionTestHandler(true)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "companion.example:18789"
+	req.Header.Set("Origin", "http://"+req.Host)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("remote request without token status = %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "companion.example:18789"
+	req.Header.Set("Origin", "https://"+req.Host)
+	req.Header.Set("X-Wechat-Companion-Token", token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authenticated remote request status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCompanionAuthExchangesBearerForHTTPOnlyCookie(t *testing.T) {
+	handler, token := companionTestHandler(true)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth", strings.NewReader("{}"))
+	req.Host = "companion.example:18789"
+	req.Header.Set("Origin", "https://"+req.Host)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Wechat-Companion-Token", token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("auth cookies = %#v", cookies)
+	}
+	cookie := cookies[0]
+	if cookie.Name != companionSessionCookieName || !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteStrictMode || cookie.Value == token {
+		t.Fatalf("unsafe auth cookie = %#v", cookie)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "companion.example:18789"
+	req.Header.Set("Origin", "https://"+req.Host)
+	req.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session cookie status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCompanionAuthorizationURLUsesFragment(t *testing.T) {
+	token := strings.Repeat("b2", 32)
+	got := companionAuthorizationURL("http://127.0.0.1:18789", token)
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.RawQuery != "" || u.Fragment != "token="+token {
+		t.Fatalf("authorization URL must keep token out of HTTP request: %q", got)
+	}
+}
+
+func TestCompanionAuthTokenRequiresEntropy(t *testing.T) {
+	t.Setenv("WECHAT_CLI_COMPANION_TOKEN", "too-short")
+	if _, err := companionAuthToken(); err == nil {
+		t.Fatalf("short configured token should be rejected")
+	}
+	t.Setenv("WECHAT_CLI_COMPANION_TOKEN", "")
+	token, err := companionAuthToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(token) != 64 {
+		t.Fatalf("generated token length = %d, want 64 hex characters", len(token))
+	}
 }
 
 func TestCompanionUploadHandlerStoresAttachment(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("WECHAT_CLI_STATE_DIR", stateDir)
-	handler := newCompanionHandler()
-	token := companionTestToken(t, handler)
+	handler, token := companionTestHandler(false)
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("files", "note.md")
@@ -784,19 +885,123 @@ func TestCompanionUploadHandlerStoresAttachment(t *testing.T) {
 		t.Fatalf("missing preview url: %#v", got)
 	}
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, previewURL+"?token="+token, nil)
+	req = httptest.NewRequest(http.MethodGet, previewURL, nil)
 	req.Host = "127.0.0.1"
 	req.Header.Set("Origin", "http://127.0.0.1")
+	companionAuthorizeTestCookie(req, token)
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "world") {
 		t.Fatalf("preview status=%d body=%q", rec.Code, rec.Body.String())
 	}
+	if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("text attachment content type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment;") {
+		t.Fatalf("text attachment disposition = %q", got)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "sandbox") {
+		t.Fatalf("attachment CSP = %q", got)
+	}
 	if _, err := companionAttachmentPathFromURL("../../etc/passwd"); err == nil {
 		t.Fatalf("path traversal should be rejected")
+	}
+	outside := filepath.Join(t.TempDir(), "private.txt")
+	if err := os.WriteFile(outside, []byte("private-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(filepath.Dir(path), "linked-private.txt")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	linkURL := "/api/attachment/" + filepath.Base(filepath.Dir(linkPath)) + "/" + filepath.Base(linkPath)
+	req = httptest.NewRequest(http.MethodGet, linkURL, nil)
+	req.Host = "127.0.0.1"
+	req.Header.Set("Origin", "http://127.0.0.1")
+	companionAuthorizeTestCookie(req, token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "private-data") {
+		t.Fatalf("symlink attachment status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got := companionTrustedAttachments([]companionAttachment{{Path: linkPath, Name: "linked-private.txt", MIME: "text/plain"}}); len(got) != 0 {
+		t.Fatalf("trusted attachments accepted symlink: %#v", got)
+	}
+}
+
+func TestCompanionAttachmentResponseTypeOnlyInlinesRasterImages(t *testing.T) {
+	for name, wantType := range map[string]string{
+		"photo.png":  "image/png",
+		"photo.jpg":  "image/jpeg",
+		"photo.webp": "image/webp",
+	} {
+		gotType, inline := companionAttachmentResponseType(name)
+		if gotType != wantType || !inline {
+			t.Fatalf("response type %q = %q/%v, want %q/true", name, gotType, inline, wantType)
+		}
+	}
+	for _, name := range []string{"page.html", "vector.svg", "script.js", "data.xml"} {
+		gotType, inline := companionAttachmentResponseType(name)
+		if gotType != "application/octet-stream" || inline {
+			t.Fatalf("active attachment %q = %q/%v, want octet-stream/false", name, gotType, inline)
+		}
+	}
+}
+
+func TestCompanionUploadRejectsSymlinkParent(t *testing.T) {
+	stateDir := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv("WECHAT_CLI_STATE_DIR", stateDir)
+	if err := os.Symlink(outside, filepath.Join(stateDir, "companion-uploads")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	handler, token := companionTestHandler(false)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(part, "must-not-escape"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	companionAuthorizeTestRequest(req, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("upload accepted symlink parent: %s", rec.Body.String())
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("upload escaped through symlink parent: %#v", entries)
 	}
 }
 
 func TestCompanionDesktopJXAContainsEscapedURL(t *testing.T) {
+	t.Setenv("WECHAT_CLI_COMPANION_TOKEN", "configured-env-secret-value-that-is-long")
+	secretURL := `http://127.0.0.1:18789/#token=secret-token-value`
+	for name, cmd := range map[string]*exec.Cmd{
+		"desktop": companionDesktopCommand(secretURL),
+		"browser": companionBrowserCommand(secretURL),
+	} {
+		if cmd == nil {
+			t.Fatalf("%s launcher command is nil", name)
+		}
+		if strings.Contains(strings.Join(cmd.Args, " "), "secret-token-value") {
+			t.Fatalf("%s launcher leaked bearer token in process arguments: %#v", name, cmd.Args)
+		}
+		if strings.Contains(strings.Join(cmd.Env, "\n"), "configured-env-secret-value-that-is-long") {
+			t.Fatalf("%s launcher inherited configured bearer token", name)
+		}
+	}
+
 	script := companionDesktopJXA(`http://127.0.0.1:18789/?q="微信"`)
 	if !strings.Contains(script, "WKWebView") {
 		t.Fatalf("desktop script should use WKWebView:\n%s", script)
@@ -809,7 +1014,8 @@ func TestCompanionDesktopJXAContainsEscapedURL(t *testing.T) {
 func TestCompanionIndexHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	newCompanionHandler().ServeHTTP(rec, req)
+	handler, _ := companionTestHandler(false)
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -873,8 +1079,11 @@ func TestCompanionIndexHandler(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "sanitizeConversationHistorySessions") || !strings.Contains(rec.Body.String(), "isRoutineCPULogText") {
 		t.Fatalf("index body should sanitize previously persisted routine CPU logs")
 	}
-	if !strings.Contains(rec.Body.String(), "X-Wechat-Companion-Token") || !strings.Contains(rec.Body.String(), "COMPANION_TOKEN") || strings.Contains(rec.Body.String(), companionTokenPlaceholder) {
-		t.Fatalf("index body should inject and use a per-page API token")
+	if !strings.Contains(rec.Body.String(), "X-Wechat-Companion-Token") || !strings.Contains(rec.Body.String(), "COMPANION_TOKEN") || !strings.Contains(rec.Body.String(), "window.location.hash") || !strings.Contains(rec.Body.String(), "window.sessionStorage") {
+		t.Fatalf("index body should receive its API token from the authorization fragment")
+	}
+	if !strings.Contains(rec.Body.String(), "/api/auth") || strings.Contains(rec.Body.String(), "encodeURIComponent(COMPANION_TOKEN)") {
+		t.Fatalf("index body should exchange the bearer for a cookie and keep it out of attachment URLs")
 	}
 	if !strings.Contains(rec.Body.String(), "resizeQuestionInput") || !strings.Contains(rec.Body.String(), "!event.shiftKey") {
 		t.Fatalf("index body should support a multiline chat composer")
@@ -958,7 +1167,8 @@ func TestCompanionIndexHandler(t *testing.T) {
 func TestCompanionFaviconHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
 	rec := httptest.NewRecorder()
-	newCompanionHandler().ServeHTTP(rec, req)
+	handler, _ := companionTestHandler(false)
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}

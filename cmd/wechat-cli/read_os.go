@@ -89,14 +89,15 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 		setBlocked("config_error", "Run first key setup, then rerun status.", readOSBootstrapCommand(), appName+" status --pretty")
 	} else {
 		status["account"] = compactMap(map[string]any{
-			"wxid":               cfg.Wxid,
-			"db_root_configured": cfg.DBRoot != "",
-			"schema2_key_count":  len(cfg.Keys),
-			"schema2_ready":      cfg.Ready(),
-			"image_key_ready":    cfg.ImageKey != "" || cfg.ImageXORKey != nil,
+			"identity_configured": cfg.Wxid != "",
+			"db_root_configured":  cfg.DBRoot != "",
+			"schema2_key_count":   len(cfg.Keys),
+			"schema2_ready":       cfg.Ready(),
+			"image_key_ready":     cfg.ImageKey != "" || cfg.ImageXORKey != nil,
 		})
 		if includeDebug {
 			status["account_debug"] = compactMap(map[string]any{
+				"wxid":    cfg.Wxid,
 				"db_root": cfg.DBRoot,
 			})
 		}
@@ -219,7 +220,7 @@ func readOSEntrypoints() []map[string]any {
 		{"command": "asr setup", "tool": "asr", "use": "install optional faster-whisper and SILK decode support in a local venv", "local_file_write": true},
 		{"command": "sessions", "tool": "sessions", "use": "list recent chats and unread counts"},
 		{"command": "resolve-chat", "tool": "resolve_chat", "use": "turn a human name/group name into a stable talker id"},
-		{"command": "timeline", "tool": "chat_timeline", "use": "read a chat window in display order; page with offset/next_offset"},
+		{"command": "timeline", "tool": "chat_timeline", "use": "read a chat window in display order; page with query.cursor.next_before_message"},
 		{"command": "context", "tool": "message_context", "use": "expand before/after messages around a known local_id or server_id"},
 		{"command": "tail", "tool": "read_events", "use": "read-only event tail for new chat messages or session/unread changes"},
 		{"command": "search", "tool": "search", "use": "global or scoped keyword search over WeChat FTS"},
@@ -242,8 +243,8 @@ func readOSWorkflows() []map[string]any {
 		{
 			"name": "page_full_chat",
 			"commands": []string{
-				`wechat-cli timeline "$CHAT" --limit 200 --offset 0`,
-				`repeat with data.query.next_offset while data.query.has_more`,
+				`wechat-cli timeline "$CHAT" --limit 200`,
+				`repeat with --before-message <data.query.cursor.next_before_message> while data.query.has_more`,
 			},
 		},
 		{
@@ -289,7 +290,7 @@ func readOSQualityGates() []map[string]any {
 	return []map[string]any{
 		qualityGate("install_smoke", `wechat-cli sessions --limit 5 --pretty`, "ok=true and recent sessions returned"),
 		qualityGate("agent_entrypoint", `wechat-cli agent --pretty`, "coverage/workflows/status visible from one command"),
-		qualityGate("chat_navigation", `wechat-cli timeline "$CHAT" --limit 20`, "query.has_more/next_offset usable for paging"),
+		qualityGate("chat_navigation", `wechat-cli timeline "$CHAT" --limit 20`, "query.has_more/query.cursor.next_before_message usable for stable paging"),
 		qualityGate("around_context", `wechat-cli context "$CHAT" --local-id "$LOCAL_ID" --before-count 5 --after-count 5`, "anchor plus surrounding messages returned in chronological order"),
 		qualityGate("anchor_timeline", `wechat-cli timeline "$CHAT" --before-message "$LOCAL_ID" --limit 10`, "message page can use an anchor instead of only offset"),
 		qualityGate("event_tail", `wechat-cli tail "$CHAT" --since-local-id "$LOCAL_ID" --jsonl`, "newer messages, if any, emit as JSONL events with timeline-shaped event.message"),

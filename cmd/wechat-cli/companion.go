@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -122,13 +125,16 @@ type companionCPURunnerFunc func(ctx context.Context, prompt companionPrompt, ha
 var companionCPURunner companionCPURunnerFunc = companionRunCPU
 
 type companionServer struct {
-	token string
+	token        string
+	sessionToken string
+	allowRemote  bool
 }
 
-const companionTokenPlaceholder = "__WECHAT_COMPANION_TOKEN__"
+const companionSessionCookieName = "wechat_companion_session"
 
 func runCompanionCLI(args []string, opts cliOptions) {
 	flags := parseKVFlags(args)
+	allowRemote := getBoolDefault(flags, "allow_remote", false)
 	addr := firstNonEmpty(getStr(flags, "addr"), getStr(flags, "listen"), envFirst("WECHAT_CLI_COMPANION_ADDR"))
 	if addr == "" {
 		addr = companionDefaultAddr
@@ -137,7 +143,11 @@ func runCompanionCLI(args []string, opts cliOptions) {
 	if err != nil {
 		exitCLIError(opts, 1, "invalid_argument", err.Error(), "companion", "companion")
 	}
-	if err := validateCompanionAddr(addr, getBoolDefault(flags, "allow_remote", false)); err != nil {
+	if err := validateCompanionAddr(addr, allowRemote); err != nil {
+		exitCLIError(opts, 1, "invalid_argument", err.Error(), "companion", "companion")
+	}
+	token, err := companionAuthToken()
+	if err != nil {
 		exitCLIError(opts, 1, "invalid_argument", err.Error(), "companion", "companion")
 	}
 
@@ -146,30 +156,60 @@ func runCompanionCLI(args []string, opts cliOptions) {
 		exitCLIError(opts, 1, "companion_error", err.Error(), "companion", "companion")
 	}
 	localURL := companionURLFromListener(listener)
+	authorizationURL := companionAuthorizationURL(localURL, token)
 	srv := &http.Server{
-		Handler:           newCompanionHandler(),
+		Handler:           newCompanionHandler(token, allowRemote),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if getBoolDefault(flags, "open", true) && !getBoolDefault(flags, "no_open", false) {
+	shouldOpen := getBoolDefault(flags, "open", true) && !getBoolDefault(flags, "no_open", false)
+	if shouldOpen {
 		go func() {
 			time.Sleep(250 * time.Millisecond)
 			if shouldOpenCompanionDesktop(flags) {
-				if err := openCompanionDesktop(localURL); err == nil {
+				if err := openCompanionDesktop(authorizationURL); err == nil {
 					return
 				} else {
 					fmt.Fprintf(os.Stderr, "[%s] desktop window launch failed: %v; falling back to browser\n", appName, err)
 				}
 			}
-			_ = openCompanionBrowser(localURL)
+			_ = openCompanionBrowser(authorizationURL)
 		}()
 	}
 
 	fmt.Fprintf(os.Stderr, "[%s] companion listening on %s\n", appName, localURL)
+	if allowRemote {
+		fmt.Fprintf(os.Stderr, "[%s] remote bearer authentication enabled; append %s to the trusted remote URL (use TLS or an SSH tunnel)\n", appName, companionAuthorizationFragment(token))
+	} else if !shouldOpen {
+		fmt.Fprintf(os.Stderr, "[%s] companion authorization URL: %s\n", appName, authorizationURL)
+	}
 	fmt.Fprintf(os.Stderr, "[%s] read-only sidecar; Ctrl+C to stop\n", appName)
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		exitCLIError(opts, 1, "companion_error", err.Error(), "companion", "companion")
 	}
+}
+
+func companionAuthToken() (string, error) {
+	token := strings.TrimSpace(envFirst("WECHAT_CLI_COMPANION_TOKEN"))
+	if token != "" {
+		if len(token) < 32 {
+			return "", fmt.Errorf("companion token must contain at least 32 characters")
+		}
+		return token, nil
+	}
+	var secret [32]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return "", fmt.Errorf("generate companion authentication token: %w", err)
+	}
+	return hex.EncodeToString(secret[:]), nil
+}
+
+func companionAuthorizationFragment(token string) string {
+	return "#" + url.Values{"token": []string{token}}.Encode()
+}
+
+func companionAuthorizationURL(baseURL, token string) string {
+	return strings.TrimRight(baseURL, "#") + companionAuthorizationFragment(token)
 }
 
 func normalizeCompanionAddr(addr string) (string, error) {
@@ -223,14 +263,58 @@ func companionURLFromListener(listener net.Listener) string {
 }
 
 func openCompanionBrowser(localURL string) error {
+	cmd := companionBrowserCommand(localURL)
+	if cmd == nil {
+		return fmt.Errorf("opening a browser is not supported on %s", runtime.GOOS)
+	}
+	return startCompanionLauncher(cmd)
+}
+
+func companionBrowserCommand(localURL string) *exec.Cmd {
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", localURL).Start()
+		cmd := exec.Command("/usr/bin/osascript", "-l", "JavaScript", "-")
+		cmd.Env = companionLauncherEnv()
+		cmd.Stdin = strings.NewReader(companionBrowserJXA(localURL))
+		return cmd
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", localURL).Start()
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "-")
+		cmd.Env = companionLauncherEnv()
+		cmd.Stdin = strings.NewReader("Start-Process '" + strings.ReplaceAll(localURL, "'", "''") + "'\n")
+		return cmd
 	default:
-		return exec.Command("xdg-open", localURL).Start()
+		cmd := exec.Command("/bin/sh", "-s")
+		cmd.Env = append(companionLauncherEnv(), "WECHAT_CLI_COMPANION_OPEN_URL="+localURL)
+		cmd.Stdin = strings.NewReader("exec xdg-open \"$WECHAT_CLI_COMPANION_OPEN_URL\"\n")
+		return cmd
 	}
+}
+
+func companionLauncherEnv() []string {
+	env := make([]string, 0, len(os.Environ()))
+	for _, item := range os.Environ() {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && key == "WECHAT_CLI_COMPANION_TOKEN" {
+			continue
+		}
+		env = append(env, item)
+	}
+	return env
+}
+
+func companionBrowserJXA(localURL string) string {
+	escapedURL, _ := json.Marshal(localURL)
+	return fmt.Sprintf(`ObjC.import('AppKit');
+$.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(%s));
+`, string(escapedURL))
+}
+
+func startCompanionLauncher(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 func shouldOpenCompanionDesktop(flags map[string]any) bool {
@@ -244,7 +328,14 @@ func openCompanionDesktop(localURL string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("desktop companion window is currently implemented for macOS")
 	}
-	return exec.Command("osascript", "-l", "JavaScript", "-e", companionDesktopJXA(localURL)).Start()
+	return startCompanionLauncher(companionDesktopCommand(localURL))
+}
+
+func companionDesktopCommand(localURL string) *exec.Cmd {
+	cmd := exec.Command("/usr/bin/osascript", "-l", "JavaScript", "-")
+	cmd.Env = companionLauncherEnv()
+	cmd.Stdin = strings.NewReader(companionDesktopJXA(localURL))
+	return cmd
 }
 
 func companionDesktopJXA(localURL string) string {
@@ -301,11 +392,12 @@ app.run();
 `, string(escapedURL))
 }
 
-func newCompanionHandler() http.Handler {
-	srv := &companionServer{token: companionRandomID()}
+func newCompanionHandler(token string, allowRemote bool) http.Handler {
+	srv := &companionServer{token: token, sessionToken: companionSessionToken(token), allowRemote: allowRemote}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.indexHandler)
 	mux.HandleFunc("/favicon.ico", companionFaviconHandler)
+	mux.HandleFunc("/api/auth", srv.guard(srv.authHandler))
 	mux.HandleFunc("/api/status", srv.guard(companionStatusHandler))
 	mux.HandleFunc("/api/sessions", srv.guard(companionSessionsHandler))
 	mux.HandleFunc("/api/timeline", srv.guard(companionTimelineHandler))
@@ -327,7 +419,10 @@ func (s *companionServer) indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, strings.ReplaceAll(companionHTML, companionTokenPlaceholder, s.token))
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	_, _ = io.WriteString(w, companionHTML)
 }
 
 func (s *companionServer) guard(next http.HandlerFunc) http.HandlerFunc {
@@ -341,7 +436,7 @@ func (s *companionServer) guard(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *companionServer) checkRequest(r *http.Request) error {
-	if !companionRequestHostAllowed(r) {
+	if !companionRequestHostAllowed(r, s.allowRemote) {
 		return fmt.Errorf("request host is not loopback")
 	}
 	if !s.checkToken(r) {
@@ -361,19 +456,47 @@ func (s *companionServer) checkRequest(r *http.Request) error {
 
 func (s *companionServer) checkToken(r *http.Request) bool {
 	token := strings.TrimSpace(r.Header.Get("X-Wechat-Companion-Token"))
-	if token == "" {
-		token = strings.TrimSpace(r.URL.Query().Get("token"))
+	if token != "" && len(token) == len(s.token) && subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
+		return true
 	}
-	return token != "" && token == s.token
+	cookie, err := r.Cookie(companionSessionCookieName)
+	return err == nil && len(cookie.Value) == len(s.sessionToken) && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.sessionToken)) == 1
 }
 
-func companionRequestHostAllowed(r *http.Request) bool {
+func companionSessionToken(token string) string {
+	digest := sha256.Sum256([]byte("wechat-companion-session\x00" + token))
+	return hex.EncodeToString(digest[:])
+}
+
+func (s *companionServer) authHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeCompanionError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     companionSessionCookieName,
+		Value:    s.sessionToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https"),
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeCompanionJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"authenticated": true}})
+}
+
+func companionRequestHostAllowed(r *http.Request, allowRemote bool) bool {
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
 	}
 	if host == "" {
 		return false
+	}
+	if strings.ContainsAny(host, "\r\n\x00") {
+		return false
+	}
+	if allowRemote {
+		return true
 	}
 	hostOnly, _, err := net.SplitHostPort(host)
 	if err != nil {
@@ -401,7 +524,7 @@ func companionRequestSameOrigin(r *http.Request) bool {
 }
 
 func companionOriginMatchesHost(u *url.URL, host string) bool {
-	if u == nil || !strings.EqualFold(u.Scheme, "http") {
+	if u == nil || (!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) {
 		return false
 	}
 	return strings.EqualFold(strings.Trim(host, "[]"), strings.Trim(u.Host, "[]"))
@@ -589,13 +712,51 @@ func companionAttachmentHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := strings.TrimPrefix(r.URL.Path, "/api/attachment/")
-	path, err := companionAttachmentPathFromURL(rel)
+	path, err := companionAttachmentCandidateFromURL(rel)
 	if err != nil {
 		writeCompanionError(w, http.StatusNotFound, "not_found", "attachment not found")
 		return
 	}
+	file, info, err := companionOpenTrustedAttachmentPath(path)
+	if err != nil {
+		writeCompanionError(w, http.StatusNotFound, "not_found", "attachment not found")
+		return
+	}
+	defer file.Close()
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	http.ServeFile(w, r, path)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	contentType, inline := companionAttachmentResponseType(info.Name())
+	w.Header().Set("Content-Type", contentType)
+	disposition := "attachment"
+	if inline {
+		disposition = "inline"
+	}
+	if value := mime.FormatMediaType(disposition, map[string]string{"filename": info.Name()}); value != "" {
+		w.Header().Set("Content-Disposition", value)
+	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+}
+
+func companionAttachmentResponseType(name string) (string, bool) {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png":
+		return "image/png", true
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	case ".bmp":
+		return "image/bmp", true
+	case ".heic", ".heif":
+		return "image/heic", true
+	default:
+		return "application/octet-stream", false
+	}
 }
 
 func companionBuildAskData(ctx context.Context, req companionAskRequest, emit companionStreamEmitter) (map[string]any, int, string, string) {
@@ -1844,6 +2005,9 @@ func companionCLIChildEnv(strictReadOnly bool) []string {
 		if !ok {
 			continue
 		}
+		if key == "WECHAT_CLI_COMPANION_TOKEN" {
+			continue
+		}
 		if strings.HasPrefix(key, "WECHAT_CLI_") || strings.HasPrefix(key, "WXKEY_") {
 			next = upsertEnv(next, key, value)
 		}
@@ -2486,31 +2650,68 @@ func companionSaveUploadedFile(header *multipart.FileHeader) (companionAttachmen
 	if err != nil {
 		return companionAttachment{}, err
 	}
-	now := time.Now()
-	dir := filepath.Join(stateDir, "companion-uploads", now.Format("20060102"))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return companionAttachment{}, err
 	}
+	stateRoot, err := companionOpenVerifiedRoot(stateDir)
+	if err != nil {
+		return companionAttachment{}, fmt.Errorf("companion state path is not a trusted directory: %w", err)
+	}
+	defer stateRoot.Close()
+	now := time.Now()
+	relDir := filepath.Join("companion-uploads", now.Format("20060102"))
+	if err := stateRoot.MkdirAll(relDir, 0o700); err != nil {
+		return companionAttachment{}, err
+	}
+	if err := companionRejectSymlinkComponents(stateRoot, relDir); err != nil {
+		return companionAttachment{}, err
+	}
+	dayRoot, err := stateRoot.OpenRoot(relDir)
+	if err != nil {
+		return companionAttachment{}, err
+	}
+	defer dayRoot.Close()
 	id := companionRandomID()
 	name := safeCacheID(filepath.Base(header.Filename))
 	if name == "default" {
 		name = "attachment"
 	}
-	dstPath := filepath.Join(dir, id+"-"+name)
-	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	fileName := id + "-" + name
+	dstPath := filepath.Join(stateDir, relDir, fileName)
+	dst, err := dayRoot.OpenFile(fileName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return companionAttachment{}, err
 	}
-	defer dst.Close()
+	keepFile := false
+	defer func() {
+		_ = dst.Close()
+		if !keepFile {
+			_ = dayRoot.Remove(fileName)
+		}
+	}()
 	limited := io.LimitReader(src, companionUploadFileMaxSize+1)
 	n, err := io.Copy(dst, limited)
 	if err != nil {
 		return companionAttachment{}, err
 	}
 	if n > companionUploadFileMaxSize {
-		_ = os.Remove(dstPath)
 		return companionAttachment{}, fmt.Errorf("%s exceeds 64MB", header.Filename)
 	}
+	if err := dst.Sync(); err != nil {
+		return companionAttachment{}, err
+	}
+	dstInfo, err := dst.Stat()
+	if err != nil {
+		return companionAttachment{}, err
+	}
+	pathInfo, err := os.Lstat(dstPath)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, dstInfo) {
+		return companionAttachment{}, fmt.Errorf("uploaded attachment path changed during validation")
+	}
+	if err := dst.Close(); err != nil {
+		return companionAttachment{}, err
+	}
+	keepFile = true
 	mimeType := strings.TrimSpace(header.Header.Get("Content-Type"))
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
@@ -2525,14 +2726,30 @@ func companionSaveUploadedFile(header *multipart.FileHeader) (companionAttachmen
 		URL:  "/api/attachment/" + now.Format("20060102") + "/" + url.PathEscape(filepath.Base(dstPath)),
 	}
 	if companionAttachmentLooksText(name, mimeType) {
-		if preview, err := companionReadTextPreview(dstPath, companionAttachmentTextMax); err == nil {
-			attachment.TextPreview = preview
+		if previewFile, _, err := companionOpenTrustedAttachmentPath(dstPath); err == nil {
+			if preview, err := companionReadTextPreviewReader(previewFile, companionAttachmentTextMax); err == nil {
+				attachment.TextPreview = preview
+			}
+			_ = previewFile.Close()
 		}
 	}
 	return attachment, nil
 }
 
 func companionAttachmentPathFromURL(rel string) (string, error) {
+	path, err := companionAttachmentCandidateFromURL(rel)
+	if err != nil {
+		return "", err
+	}
+	file, _, err := companionOpenTrustedAttachmentPath(path)
+	if err != nil {
+		return "", err
+	}
+	_ = file.Close()
+	return path, nil
+}
+
+func companionAttachmentCandidateFromURL(rel string) (string, error) {
 	parts := strings.Split(strings.Trim(rel, "/"), "/")
 	if len(parts) != 2 {
 		return "", fmt.Errorf("invalid attachment path")
@@ -2557,9 +2774,6 @@ func companionAttachmentPathFromURL(rel string) (string, error) {
 	if !strings.HasPrefix(cleanPath, cleanRoot) {
 		return "", fmt.Errorf("invalid attachment path")
 	}
-	if info, err := os.Stat(cleanPath); err != nil || info.IsDir() {
-		return "", fmt.Errorf("attachment not found")
-	}
 	return cleanPath, nil
 }
 
@@ -2567,19 +2781,14 @@ func companionTrustedAttachments(items []companionAttachment) []companionAttachm
 	if len(items) == 0 {
 		return nil
 	}
-	root, err := companionUploadRoot()
-	if err != nil {
-		return nil
-	}
-	cleanRoot := filepath.Clean(root) + string(os.PathSeparator)
 	out := make([]companionAttachment, 0, len(items))
 	for _, item := range items {
 		path := filepath.Clean(strings.TrimSpace(item.Path))
-		if path == "" || !strings.HasPrefix(path, cleanRoot) {
+		if path == "" {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() {
+		file, info, err := companionOpenTrustedAttachmentPath(path)
+		if err != nil {
 			continue
 		}
 		name := safeCacheID(filepath.Base(firstNonEmpty(item.Name, info.Name())))
@@ -2600,13 +2809,107 @@ func companionTrustedAttachments(items []companionAttachment) []companionAttachm
 			URL:  item.URL,
 		}
 		if companionAttachmentLooksText(name, mimeType) {
-			if preview, err := companionReadTextPreview(path, companionAttachmentTextMax); err == nil {
-				next.TextPreview = preview
+			if _, err := file.Seek(0, io.SeekStart); err == nil {
+				preview, err := companionReadTextPreviewReader(file, companionAttachmentTextMax)
+				if err == nil {
+					next.TextPreview = preview
+				}
 			}
 		}
+		_ = file.Close()
 		out = append(out, next)
 	}
 	return out
+}
+
+func companionOpenTrustedAttachmentPath(path string) (*os.File, os.FileInfo, error) {
+	rootPath, err := companionUploadRoot()
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanRoot := filepath.Clean(rootPath)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return nil, nil, fmt.Errorf("attachment path escapes upload root")
+	}
+	root, err := companionOpenVerifiedRoot(cleanRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	if err := companionRejectSymlinkComponents(root, rel); err != nil {
+		return nil, nil, err
+	}
+	file, err := root.Open(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("attachment is not a regular file")
+	}
+	if err := companionRejectSymlinkComponents(root, rel); err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	leaf, err := root.Lstat(rel)
+	if err != nil || leaf.Mode()&os.ModeSymlink != 0 || !os.SameFile(leaf, info) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("attachment changed during validation")
+	}
+	return file, info, nil
+}
+
+func companionOpenVerifiedRoot(path string) (*os.Root, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() {
+		return nil, fmt.Errorf("path is not a real directory")
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	openedDir, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	openedInfo, statErr := openedDir.Stat()
+	_ = openedDir.Close()
+	if statErr != nil {
+		_ = root.Close()
+		return nil, statErr
+	}
+	pathInfo, err = os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() || !os.SameFile(pathInfo, openedInfo) {
+		_ = root.Close()
+		return nil, fmt.Errorf("directory changed during validation")
+	}
+	return root, nil
+}
+
+func companionRejectSymlinkComponents(root *os.Root, rel string) error {
+	current := ""
+	parts := strings.Split(filepath.Clean(rel), string(os.PathSeparator))
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("invalid attachment path component")
+		}
+		current = filepath.Join(current, part)
+		info, err := root.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("attachment path contains a symbolic link")
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return fmt.Errorf("attachment parent is not a directory")
+		}
+	}
+	return nil
 }
 
 func companionUploadRoot() (string, error) {
@@ -2652,8 +2955,8 @@ func companionAttachmentLooksText(name, mimeType string) bool {
 	}
 }
 
-func companionReadTextPreview(path string, max int) (string, error) {
-	data, err := os.ReadFile(path)
+func companionReadTextPreviewReader(reader io.Reader, max int) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, int64(max)+1))
 	if err != nil {
 		return "", err
 	}
@@ -4104,7 +4407,32 @@ const LEGACY_HISTORY_KEYS = [
   "wechat_assistant_active_chat_id_v3"
 ];
 const SIDEBAR_COLLAPSED_KEY = "wechat_assistant_sidebar_collapsed_v1";
-const COMPANION_TOKEN = "` + companionTokenPlaceholder + `";
+const COMPANION_TOKEN_KEY = "wechat_companion_auth_token_v1";
+
+function companionTokenFromLocation() {
+  const fragment = new URLSearchParams(String(window.location.hash || "").replace(/^#/, ""));
+  const supplied = String(fragment.get("token") || "").trim();
+  if (supplied) {
+    try { window.sessionStorage.setItem(COMPANION_TOKEN_KEY, supplied); } catch (_) {}
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    return supplied;
+  }
+  try { return String(window.sessionStorage.getItem(COMPANION_TOKEN_KEY) || "").trim(); } catch (_) { return ""; }
+}
+
+let COMPANION_TOKEN = companionTokenFromLocation();
+
+async function companionAuthenticate() {
+  if (!COMPANION_TOKEN) return;
+  const res = await fetch("/api/auth", {
+    method: "POST",
+    headers: companionHeaders({"Content-Type": "application/json"}),
+    body: "{}"
+  });
+  if (!res.ok) throw new Error("伴侣认证失败");
+  try { window.sessionStorage.removeItem(COMPANION_TOKEN_KEY); } catch (_) {}
+  COMPANION_TOKEN = "";
+}
 
 async function api(path, options) {
   const nextOptions = withCompanionToken(options || {});
@@ -4160,7 +4488,7 @@ function withCompanionToken(options) {
 
 function companionHeaders(headers) {
   const out = new Headers(headers || {});
-  out.set("X-Wechat-Companion-Token", COMPANION_TOKEN);
+  if (COMPANION_TOKEN) out.set("X-Wechat-Companion-Token", COMPANION_TOKEN);
   return out;
 }
 
@@ -4232,10 +4560,7 @@ function attachmentGlyph(item) {
 }
 
 function attachmentURL(url) {
-  const value = String(url || "");
-  if (!value) return "";
-  const sep = value.includes("?") ? "&" : "?";
-  return value + sep + "token=" + encodeURIComponent(COMPANION_TOKEN);
+  return String(url || "");
 }
 
 function formatBytes(value) {
@@ -5643,8 +5968,13 @@ renderHistoryList();
 renderTargets();
 updateAskAvailability();
 resizeQuestionInput();
-loadStatus();
-loadSessions();
+companionAuthenticate().then(() => {
+  loadStatus();
+  loadSessions();
+}).catch((err) => {
+  setConnected(false, "认证失败");
+  if (!state.messages.length) addMessage("assistant", err.message, {error: true});
+});
 </script>
 </body>
 </html>

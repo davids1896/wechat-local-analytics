@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,7 +44,7 @@ func dir() (string, error) {
 		return "", err
 	}
 	d := filepath.Join(h, ".config", "wxcli")
-	if err := os.MkdirAll(d, 0o700); err != nil {
+	if err := validateHomeConfigComponents(filepath.Join(d, "config.json")); err != nil {
 		return "", err
 	}
 	return d, nil
@@ -87,14 +88,268 @@ func Save(c *Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	return withConfigWriteLock(p, func(root *os.Root, base string) error {
+		return saveConfigToRoot(root, base, c)
+	})
+}
+
+// Update performs a config read-modify-write transaction while holding the
+// same cross-process lock used by wxkey. The callback must not call Save or
+// Update recursively.
+func Update(mutate func(*Config) error) error {
+	if mutate == nil {
+		return errors.New("config update callback is nil")
+	}
+	p, err := Path()
+	if err != nil {
 		return err
 	}
+	return withConfigWriteLock(p, func(root *os.Root, base string) error {
+		cfg, err := loadConfigFromRoot(root, base)
+		if err != nil {
+			return err
+		}
+		applyEnvOverrides(cfg)
+		if err := mutate(cfg); err != nil {
+			return err
+		}
+		return saveConfigToRoot(root, base, cfg)
+	})
+}
+
+func withConfigWriteLock(path string, fn func(*os.Root, string) error) error {
+	root, base, err := openConfigWriteRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	lockName := "." + base + ".lock"
+	if info, err := root.Lstat(lockName); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("config lock path must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	lockFile, err := root.OpenFile(lockName, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	lockInfo, err := lockFile.Stat()
+	if err != nil || !lockInfo.Mode().IsRegular() {
+		return errors.New("config lock is not a regular file")
+	}
+	pathInfo, err := root.Lstat(lockName)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, lockInfo) {
+		return errors.New("config lock path changed during validation")
+	}
+	if err := lockFile.Chmod(0o600); err != nil {
+		return err
+	}
+	unlock, err := lockConfigFile(lockFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unlock() }()
+	return fn(root, base)
+}
+
+func openConfigWriteRoot(p string) (*os.Root, string, error) {
+	if err := validateHomeConfigComponents(p); err != nil {
+		return nil, "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, "", err
+	}
+	if err := validateSavePath(p); err != nil {
+		return nil, "", err
+	}
+	parent := filepath.Dir(p)
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, "", err
+	}
+	openedDir, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, "", err
+	}
+	openedInfo, statErr := openedDir.Stat()
+	_ = openedDir.Close()
+	if statErr != nil {
+		_ = root.Close()
+		return nil, "", statErr
+	}
+	parentInfo, err := os.Lstat(parent)
+	if err != nil || parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() || !os.SameFile(parentInfo, openedInfo) {
+		_ = root.Close()
+		return nil, "", errors.New("config parent changed during validation")
+	}
+	if err := validateHomeConfigComponents(p); err != nil {
+		_ = root.Close()
+		return nil, "", err
+	}
+	return root, filepath.Base(p), nil
+}
+
+func saveConfigToRoot(root *os.Root, base string, c *Config) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o600)
+	b = append(b, '\n')
+	return writeConfigToRoot(root, base, b)
+}
+
+func loadConfigFromRoot(root *os.Root, base string) (*Config, error) {
+	file, err := root.Open(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return &Config{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("config path must be a regular file")
+	}
+	pathInfo, err := root.Lstat(base)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, info) {
+		return nil, errors.New("config path changed during validation")
+	}
+	var cfg Config
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func writeConfigToRoot(root *os.Root, base string, data []byte) error {
+	if err := validateRootSaveTarget(root, base); err != nil {
+		return err
+	}
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	tmpName := fmt.Sprintf(".%s.tmp-%x", base, nonce[:])
+	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	keepTemp := true
+	defer func() {
+		_ = tmp.Close()
+		if keepTemp {
+			_ = root.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := validateRootSaveTarget(root, base); err != nil {
+		return err
+	}
+	if err := root.Rename(tmpName, base); err != nil {
+		return err
+	}
+	keepTemp = false
+	return nil
+}
+
+func validateRootSaveTarget(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("config path must not be a symbolic link")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("config path must be a regular file")
+	}
+	return nil
+}
+
+func validateSavePath(path string) error {
+	dirInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("config parent must be a real directory, not a symbolic link")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return validateHomeConfigComponents(path)
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("config path must not be a symbolic link")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("config path must be a regular file")
+	}
+	return validateHomeConfigComponents(path)
+}
+
+func validateHomeConfigComponents(path string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	home, err = filepath.Abs(filepath.Clean(home))
+	if err != nil {
+		return err
+	}
+	clean, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(home, clean)
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return nil
+	}
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	current := ""
+	parts := strings.Split(filepath.Clean(rel), string(os.PathSeparator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := root.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("config path components must not be symbolic links")
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return errors.New("config parent component must be a directory")
+		}
+	}
+	return nil
 }
 
 func applyEnvOverrides(c *Config) {

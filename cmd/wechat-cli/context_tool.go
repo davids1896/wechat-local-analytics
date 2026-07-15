@@ -39,6 +39,8 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 		return nil, err
 	}
 	defer closeMsgDBs(shards)
+	warnings := msgShardWarnings(shards)
+	mediaEnrichmentFailed := false
 
 	anchor, err := s.findContextAnchorRow(shards, tableName, ref)
 	if err != nil {
@@ -78,7 +80,8 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 	setContextTalker(talker, allRows)
 	if includeMediaPathsForMessages(a) {
 		if err := s.enrichMessageMediaResources(rows); err != nil {
-			return nil, err
+			mediaEnrichmentFailed = true
+			warnings = appendUniqueStrings(warnings, "media_enrichment_failed: "+err.Error())
 		}
 	}
 	s.finishContextRows(talker, allRows)
@@ -97,11 +100,13 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 			"returned":       len(messages),
 		}),
 		"freshness": compactMap(map[string]any{
-			"message_source":      "live_message_db",
-			"metadata_cache_role": "chat/sender display names only",
-			"anchor_time":         agentMessageTime(anchor),
-			"anchor_time_iso":     agentMessageTimeISO(anchor),
+			"message_source":            "live_message_db",
+			"metadata_cache_role":       "chat/sender display names only",
+			"anchor_time":               agentMessageTime(anchor),
+			"anchor_time_iso":           agentMessageTimeISO(anchor),
+			"media_enrichment_complete": !mediaEnrichmentFailed,
 		}),
+		"warnings": warnings,
 		"messages": messages,
 	}, nil
 }

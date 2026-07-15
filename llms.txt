@@ -11,11 +11,11 @@ Do not use for:
 
 Install:
 - macOS:
-  1. `curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh`
+  1. `curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | zsh`
   2. `~/.local/share/wechat-cli/wxkey bootstrap`
   3. `~/.local/bin/wechat-cli sessions --limit 5 --pretty`
 - Windows:
-  1. `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"`
+  1. `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1 | iex"`
   2. `wechat-cli sessions --limit 5 --pretty`
 - Default install is CLI-only: no external protocol registration, no watcher.
 - Voice transcription is opt-in: add `--with-asr` to the release installer, or run `wechat-cli asr setup` after install. This creates `~/.wechat-cli/asr-venv`, installs `faster-whisper` plus `silk-python`, and preloads `large-v3` unless `--skip-model-download` is passed.

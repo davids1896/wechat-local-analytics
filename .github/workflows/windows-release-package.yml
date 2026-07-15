@@ -6,7 +6,6 @@ on:
       version:
         description: "wechat-cli release version without leading v"
         required: true
-        default: "1.6.15"
       wcdb_version:
         description: "Tencent/WCDB release version without leading v"
         required: true
@@ -17,10 +16,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Test source at release tag
+        shell: powershell
+        run: go test ./...
 
       - name: Build WCDB DLL
         shell: powershell
@@ -31,6 +37,33 @@ jobs:
         shell: powershell
         run: |
           .\scripts\package-windows.ps1 -Version "${{ inputs.version }}" -WcdbLib .\lib\libWCDB.dll
+
+      - name: Verify packaged binary identity
+        shell: powershell
+        run: |
+          $version = "${{ inputs.version }}"
+          $exe = ".\dist\wechat-cli-v$version-windows-amd64\wechat-cli.exe"
+          $result = & $exe --version | ConvertFrom-Json
+          if ($result.data.version -ne $version) {
+            $result | ConvertTo-Json -Depth 8
+            throw "packaged binary version does not match release version"
+          }
+
+      - name: Verify standalone bootstrap assets
+        shell: powershell
+        run: |
+          foreach ($name in @("install-release.sh", "install-release.ps1")) {
+            $asset = Join-Path .\dist $name
+            $checksum = "$asset.sha256"
+            if (-not (Test-Path -LiteralPath $asset) -or -not (Test-Path -LiteralPath $checksum)) {
+              throw "missing standalone bootstrap asset or checksum: $name"
+            }
+            $expected = ((Get-Content -LiteralPath $checksum -Raw) -split '\s+')[0]
+            $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash
+            if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or $expected -ne $actual) {
+              throw "standalone bootstrap checksum mismatch: $name"
+            }
+          }
 
       - name: Smoke installer from release zip
         shell: powershell
@@ -58,4 +91,8 @@ jobs:
             dist/wechat-cli-v${{ inputs.version }}-windows-amd64.zip.sha256
             dist/wechat-cli-latest-windows-amd64.zip
             dist/wechat-cli-latest-windows-amd64.zip.sha256
+            dist/install-release.sh
+            dist/install-release.sh.sha256
+            dist/install-release.ps1
+            dist/install-release.ps1.sha256
           if-no-files-found: error

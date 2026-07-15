@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/r266-tech/wechat-cli/internal/safefile"
 )
 
 type asrSetupOptions struct {
@@ -154,6 +158,7 @@ func parseASRSetupOptions(args []string) (asrSetupOptions, error) {
 }
 
 func asrStatusData() map[string]any {
+	runtimeCfg, _ := loadASRRuntimeConfig()
 	venv, _ := defaultASRVenvDir()
 	venvPython := asrVenvPythonPath(venv)
 	customCmd := envFirst("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "WX_MCP_VOICE_TRANSCRIBE_CMD")
@@ -186,8 +191,10 @@ func asrStatusData() map[string]any {
 		"ready":                 asrReady,
 		"wechat_voice_ready":    asrReady && silkReady,
 		"default_engine":        "faster-whisper",
-		"default_model":         defaultFasterWhisperModel,
-		"default_language":      "zh",
+		"default_model":         firstNonEmpty(runtimeCfg.Model, defaultFasterWhisperModel),
+		"default_language":      firstNonEmpty(runtimeCfg.Language, "zh"),
+		"default_device":        firstNonEmpty(runtimeCfg.Device, "cpu"),
+		"default_compute_type":  firstNonEmpty(runtimeCfg.ComputeType, "int8"),
 		"state_venv":            venv,
 		"state_venv_python":     venvPython,
 		"custom_transcriber":    customCmd,
@@ -248,6 +255,12 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 	if !opts.SkipModelDownload {
 		actions = append(actions, "preload faster-whisper model "+opts.Model)
 	}
+	if opts.Force {
+		if err := validateASRForceVenv(venv); err != nil {
+			return nil, err
+		}
+		actions = append([]string{"remove existing managed ASR virtualenv at " + venv}, actions...)
+	}
 	if opts.DryRun {
 		return compactMap(map[string]any{
 			"dry_run":             true,
@@ -266,7 +279,9 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 	}
 
 	if opts.Force {
-		_ = os.RemoveAll(venv)
+		if err := os.RemoveAll(venv); err != nil {
+			return nil, fmt.Errorf("remove existing ASR virtualenv %q: %w", venv, err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(venv), 0o700); err != nil {
 		return nil, err
@@ -291,8 +306,20 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 			return nil, fmt.Errorf("preload faster-whisper model failed: %w: %s", err, trimCommandOutput(out))
 		}
 	}
+	if err := saveASRRuntimeConfig(asrRuntimeConfig{
+		Venv:        venv,
+		Model:       opts.Model,
+		Language:    opts.Language,
+		Device:      opts.Device,
+		ComputeType: opts.ComputeType,
+	}); err != nil {
+		return nil, fmt.Errorf("save ASR runtime config: %w", err)
+	}
 
 	status := asrStatusData()
+	if !asrReadyBool(status["ready"]) || !asrReadyBool(status["wechat_voice_ready"]) {
+		return nil, fmt.Errorf("ASR postflight failed: %v", status["warnings"])
+	}
 	return compactMap(map[string]any{
 		"dry_run":             false,
 		"ready":               status["ready"],
@@ -308,6 +335,62 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 		"warnings":            status["warnings"],
 		"next_action":         status["next_action"],
 	}), nil
+}
+
+func validateASRForceVenv(path string) error {
+	clean, err := filepath.Abs(filepath.Clean(strings.TrimSpace(path)))
+	if err != nil || strings.TrimSpace(path) == "" {
+		return fmt.Errorf("invalid ASR virtualenv path %q", path)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(clean); resolveErr == nil {
+		clean = resolved
+	}
+
+	dangerous := []string{string(os.PathSeparator)}
+	for _, candidate := range []func() (string, error){os.UserHomeDir, os.Getwd} {
+		if value, valueErr := candidate(); valueErr == nil && value != "" {
+			dangerous = append(dangerous, filepath.Clean(value))
+		}
+	}
+	for _, protected := range dangerous {
+		if samePath(clean, protected) || pathContains(clean, protected) {
+			return fmt.Errorf("refusing to remove unsafe ASR virtualenv path %q", clean)
+		}
+	}
+
+	stateDir, stateErr := appStateDir()
+	managedByLocation := stateErr == nil && samePath(clean, filepath.Join(stateDir, "asr-venv"))
+	if _, statErr := os.Lstat(clean); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("inspect ASR virtualenv %q: %w", clean, statErr)
+	}
+	if managedByLocation {
+		return nil
+	}
+	marker := filepath.Join(clean, "pyvenv.cfg")
+	info, markerErr := os.Lstat(marker)
+	if markerErr != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing to remove custom ASR path %q without a regular pyvenv.cfg marker", clean)
+	}
+	return nil
+}
+
+func samePath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// pathContains reports whether child is path itself or a descendant of it.
+func pathContains(parent, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
 }
 
 const fasterWhisperWarmupPythonScript = `
@@ -326,11 +409,88 @@ func defaultASRVenvDir() (string, error) {
 	if p := envFirst("WECHAT_CLI_ASR_VENV", "WX_MCP_ASR_VENV"); p != "" {
 		return filepath.Clean(p), nil
 	}
+	if cfg, err := loadASRRuntimeConfig(); err == nil && strings.TrimSpace(cfg.Venv) != "" {
+		return filepath.Clean(cfg.Venv), nil
+	}
 	stateDir, err := appStateDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(stateDir, "asr-venv"), nil
+}
+
+type asrRuntimeConfig struct {
+	Venv        string `json:"venv"`
+	Model       string `json:"model"`
+	Language    string `json:"language"`
+	Device      string `json:"device"`
+	ComputeType string `json:"compute_type"`
+}
+
+func asrRuntimeConfigPath() (string, error) {
+	stateDir, err := appStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(stateDir, "asr.json"), nil
+}
+
+func loadASRRuntimeConfig() (asrRuntimeConfig, error) {
+	path, err := asrRuntimeConfigPath()
+	if err != nil {
+		return asrRuntimeConfig{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return asrRuntimeConfig{}, err
+	}
+	var cfg asrRuntimeConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return asrRuntimeConfig{}, err
+	}
+	return cfg, nil
+}
+
+func saveASRRuntimeConfig(cfg asrRuntimeConfig) error {
+	path, err := asrRuntimeConfigPath()
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to replace symlink %q", path)
+	} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".asr-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := safefile.Replace(tmpPath, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func defaultASRPythonCandidates() []string {

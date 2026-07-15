@@ -11,11 +11,15 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, ok := raw.([]wcdb.Row)
+	rows, ok := cliResultRows(raw)
 	if !ok {
 		return nil, fmt.Errorf("search_with_context internal error: search returned %T", raw)
 	}
+	freshness, warnings := searchWithContextDiagnostics(raw)
 	searchLimit := getInt(a, "limit", 20)
+	if searchLimit > 0 && len(rows) > searchLimit {
+		rows = rows[:searchLimit]
+	}
 	contextLimit := getInt(a, "context_limit", minInt(searchLimit, 5))
 	if contextLimit < 0 {
 		contextLimit = 0
@@ -36,8 +40,9 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 
 	hits := make([]map[string]any, 0, len(rows))
 	contextsReturned := 0
-	for i, row := range rows {
-		msg := cliSearchMessageRow(map[string]any(row), a)
+	for i, rawRow := range rows {
+		row := wcdb.Row(rawRow)
+		msg := cliSearchMessageRow(rawRow, a)
 		msg["context_role"] = "search_hit"
 		hit := map[string]any{
 			"anchor_id": msg["id"],
@@ -93,14 +98,34 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 		query["context_limit"] = contextLimit
 		query["contexts_returned"] = contextsReturned
 	}
-	return map[string]any{
-		"query": query,
-		"freshness": map[string]any{
-			"message_source":      "live_message_fts_plus_live_message_db_context",
-			"metadata_cache_role": "chat/sender display names only",
-		},
-		"hits": hits,
-	}, nil
+	if complete, ok := freshness["complete"].(bool); ok && !complete {
+		query["has_more_unknown"] = true
+	}
+	result := map[string]any{
+		"query":     query,
+		"freshness": freshness,
+		"hits":      hits,
+	}
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
+	}
+	return result, nil
+}
+
+func searchWithContextDiagnostics(searchResult any) (map[string]any, []string) {
+	searchFreshness, warnings := cliRowsResultMetadata(searchResult)
+	freshness := map[string]any{
+		"message_source":      "live_message_fts_plus_live_message_db_context",
+		"metadata_cache_role": "chat/sender display names only",
+	}
+	for key, value := range searchFreshness {
+		if key == "message_source" {
+			freshness["search_source"] = value
+			continue
+		}
+		freshness[key] = value
+	}
+	return freshness, warnings
 }
 
 func searchContextCountArg(a map[string]any, primary, alias string, def int) int {

@@ -21,7 +21,7 @@ esac
 usage() {
   cat <<'EOF'
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
+  curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [--with-asr] [installer args...]
   ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
 
@@ -134,15 +134,15 @@ fallback_asset_url() {
 verify_sha256() {
   local zip="$1"
   local sha_file="$2"
-  [[ -f "$sha_file" ]] || return 0
-  if ! have_cmd shasum; then
-    warn "shasum not found; skipping checksum verification."
-    return 0
-  fi
+  [[ -f "$sha_file" ]] || fail "checksum file missing after successful download."
+  have_cmd shasum || fail "shasum is required to verify a downloaded checksum file."
   local expected actual
   expected="$(awk '{print tolower($1); exit}' "$sha_file")"
   actual="$(shasum -a 256 "$zip" | awk '{print tolower($1)}')"
-  [[ -n "$expected" ]] || fail "empty sha256 file."
+  [[ "${#expected}" -eq 64 ]] || fail "invalid sha256 file."
+  case "$expected" in
+    *[!0-9a-f]*) fail "invalid sha256 file." ;;
+  esac
   [[ "$expected" == "$actual" ]] || fail "sha256 mismatch for downloaded release zip."
 }
 
@@ -164,7 +164,7 @@ parse_args() {
         ;;
       --update)
         MODE="update"
-        INSTALL_ARGS=(--update --yes)
+        INSTALL_ARGS+=(--update)
         shift
         ;;
       --tag)
@@ -212,10 +212,7 @@ main() {
   parse_args "$@"
 
   [[ "$(uname -s)" == "Darwin" ]] || fail "this installer is for macOS; use scripts/install-release.ps1 on Windows."
-  case "$(uname -m)" in
-    arm64|aarch64) ;;
-    *) fail "this release installer supports macOS arm64 only." ;;
-  esac
+  [[ "$(uname -m)" == "arm64" ]] || fail "this release installer supports macOS arm64 only."
   have_cmd unzip || fail "unzip is required."
 
   local slug base url tmp zip sha extract install_script install_dir fallback
@@ -262,4 +259,6 @@ main() {
   ( cd "$install_dir" && ./install.sh "${INSTALL_ARGS[@]}" )
 }
 
-main "$@"
+if [[ "${ZSH_EVAL_CONTEXT:-}" != *:file ]]; then
+  main "$@"
+fi

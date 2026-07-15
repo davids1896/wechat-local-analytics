@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	"github.com/r266-tech/wechat-cli/internal/safefile"
 )
 
 const (
@@ -38,6 +39,7 @@ var (
 	sqlite3_close_v2       func(db uintptr) int32
 	sqlite3_key_v2         func(db uintptr, zDbName string, pKey unsafe.Pointer, nKey int32) int32
 	sqlite3_exec           func(db uintptr, sql string, cb uintptr, arg uintptr, errmsg *unsafe.Pointer) int32
+	sqlite3_free           func(p unsafe.Pointer)
 	sqlite3_prepare_v2     func(db uintptr, sql string, nByte int32, stmt *uintptr, tail *uintptr) int32
 	sqlite3_step           func(stmt uintptr) int32
 	sqlite3_finalize       func(stmt uintptr) int32
@@ -45,6 +47,7 @@ var (
 	sqlite3_column_name    func(stmt uintptr, i int32) unsafe.Pointer
 	sqlite3_column_text    func(stmt uintptr, i int32) unsafe.Pointer
 	sqlite3_column_int64   func(stmt uintptr, i int32) int64
+	sqlite3_column_double  func(stmt uintptr, i int32) float64
 	sqlite3_column_bytes   func(stmt uintptr, i int32) int32
 	sqlite3_column_blob    func(stmt uintptr, i int32) unsafe.Pointer
 	sqlite3_column_type    func(stmt uintptr, i int32) int32
@@ -79,6 +82,7 @@ func Bootstrap(dylibPath string) error {
 		{&sqlite3_close_v2, "sqlite3_close_v2"},
 		{&sqlite3_key_v2, "sqlite3_key_v2"},
 		{&sqlite3_exec, "sqlite3_exec"},
+		{&sqlite3_free, "sqlite3_free"},
 		{&sqlite3_prepare_v2, "sqlite3_prepare_v2"},
 		{&sqlite3_step, "sqlite3_step"},
 		{&sqlite3_finalize, "sqlite3_finalize"},
@@ -86,6 +90,7 @@ func Bootstrap(dylibPath string) error {
 		{&sqlite3_column_name, "sqlite3_column_name"},
 		{&sqlite3_column_text, "sqlite3_column_text"},
 		{&sqlite3_column_int64, "sqlite3_column_int64"},
+		{&sqlite3_column_double, "sqlite3_column_double"},
 		{&sqlite3_column_bytes, "sqlite3_column_bytes"},
 		{&sqlite3_column_blob, "sqlite3_column_blob"},
 		{&sqlite3_column_type, "sqlite3_column_type"},
@@ -175,7 +180,11 @@ func OpenPlain(dbPath string, writable bool) (*DB, error) {
 	}
 	var h uintptr
 	if rc := sqlite3_open_v2(dbPath, &h, flags, nil); rc != SQLITE_OK {
-		return nil, fmt.Errorf("sqlite3_open_v2(%s) rc=%d: %s", dbPath, rc, errmsg(h))
+		msg := errmsg(h)
+		if h != 0 {
+			_ = sqlite3_close_v2(h)
+		}
+		return nil, fmt.Errorf("sqlite3_open_v2(%s) rc=%d: %s", dbPath, rc, msg)
 	}
 	db := &DB{handle: h, path: dbPath}
 	_ = db.Exec("PRAGMA busy_timeout=5000")
@@ -185,7 +194,11 @@ func OpenPlain(dbPath string, writable bool) (*DB, error) {
 func openWithKeyBlob(dbPath string, blob []byte, flags int32) (*DB, error) {
 	var h uintptr
 	if rc := sqlite3_open_v2(dbPath, &h, flags, nil); rc != SQLITE_OK {
-		return nil, fmt.Errorf("sqlite3_open_v2(%s) rc=%d: %s", dbPath, rc, errmsg(h))
+		msg := errmsg(h)
+		if h != 0 {
+			_ = sqlite3_close_v2(h)
+		}
+		return nil, fmt.Errorf("sqlite3_open_v2(%s) rc=%d: %s", dbPath, rc, msg)
 	}
 	if rc := sqlite3_key_v2(h, "main", unsafe.Pointer(&blob[0]), int32(len(blob))); rc != SQLITE_OK {
 		sqlite3_close_v2(h)
@@ -231,6 +244,7 @@ func (d *DB) BackupTo(dstPath string) error {
 		}
 		return fmt.Errorf("sqlite3_backup_init: %s", msg)
 	}
+	busyDeadline := time.Now().Add(30 * time.Second)
 	for {
 		rc := sqlite3_backup_step(b, -1)
 		if rc == SQLITE_DONE {
@@ -240,6 +254,10 @@ func (d *DB) BackupTo(dstPath string) error {
 			continue
 		}
 		if rc == SQLITE_BUSY || rc == SQLITE_LOCKED {
+			if time.Now().After(busyDeadline) {
+				_ = sqlite3_backup_finish(b)
+				return fmt.Errorf("sqlite3_backup_step timed out after 30s: src=%s dst=%s", errmsg(d.handle), errmsg(dst.handle))
+			}
 			time.Sleep(25 * time.Millisecond)
 			continue
 		}
@@ -251,10 +269,9 @@ func (d *DB) BackupTo(dstPath string) error {
 	}
 	dst.Close()
 	closeDst = false
-	_ = os.Remove(dstPath)
 	_ = os.Remove(dstPath + "-wal")
 	_ = os.Remove(dstPath + "-shm")
-	return os.Rename(tmp, dstPath)
+	return safefile.Replace(tmp, dstPath)
 }
 
 func (d *DB) exportPlaintextTo(tmp, dstPath string) error {
@@ -269,10 +286,9 @@ func (d *DB) exportPlaintextTo(tmp, dstPath string) error {
 		_ = d.Exec("DETACH DATABASE plaintext")
 		return d.copyPlaintextTo(tmp, dstPath, fmt.Errorf("sqlcipher_export plaintext: %w", err))
 	}
-	_ = os.Remove(dstPath)
 	_ = os.Remove(dstPath + "-wal")
 	_ = os.Remove(dstPath + "-shm")
-	return os.Rename(tmp, dstPath)
+	return safefile.Replace(tmp, dstPath)
 }
 
 func (d *DB) copyPlaintextTo(tmp, dstPath string, cause error) error {
@@ -330,10 +346,9 @@ func (d *DB) copyPlaintextTo(tmp, dstPath string, cause error) error {
 		return fmt.Errorf("%v; logical copy commit: %w", cause, err)
 	}
 	dst.Close()
-	_ = os.Remove(dstPath)
 	_ = os.Remove(dstPath + "-wal")
 	_ = os.Remove(dstPath + "-shm")
-	if err = os.Rename(tmp, dstPath); err != nil {
+	if err = safefile.Replace(tmp, dstPath); err != nil {
 		return fmt.Errorf("%v; logical copy rename: %w", cause, err)
 	}
 	return nil
@@ -433,8 +448,13 @@ func (d *DB) Close() {
 
 func (d *DB) Exec(sql string) error {
 	var errPtr unsafe.Pointer
-	if rc := sqlite3_exec(d.handle, sql, 0, 0, &errPtr); rc != SQLITE_OK {
-		return fmt.Errorf("exec rc=%d: %s", rc, readCString(errPtr))
+	rc := sqlite3_exec(d.handle, sql, 0, 0, &errPtr)
+	msg := readCString(errPtr)
+	if errPtr != nil {
+		sqlite3_free(errPtr)
+	}
+	if rc != SQLITE_OK {
+		return fmt.Errorf("exec rc=%d: %s", rc, msg)
 	}
 	return nil
 }
@@ -537,31 +557,35 @@ func (d *DB) Query(sql string, args ...any) ([]Row, error) {
 func bindArgs(stmt uintptr, args []any) error {
 	for i, a := range args {
 		idx := int32(i + 1)
+		var rc int32
 		switch v := a.(type) {
 		case nil:
-			sqlite3_bind_null(stmt, idx)
+			rc = sqlite3_bind_null(stmt, idx)
 		case string:
-			sqlite3_bind_text(stmt, idx, v, int32(len(v)), ^uintptr(0))
+			rc = sqlite3_bind_text(stmt, idx, v, int32(len(v)), ^uintptr(0))
 		case []byte:
 			if len(v) == 0 {
-				sqlite3_bind_blob(stmt, idx, unsafe.Pointer(nil), 0, ^uintptr(0))
+				rc = sqlite3_bind_blob(stmt, idx, unsafe.Pointer(nil), 0, ^uintptr(0))
 			} else {
-				sqlite3_bind_blob(stmt, idx, unsafe.Pointer(&v[0]), int32(len(v)), ^uintptr(0))
+				rc = sqlite3_bind_blob(stmt, idx, unsafe.Pointer(&v[0]), int32(len(v)), ^uintptr(0))
 			}
 		case int:
-			sqlite3_bind_int64(stmt, idx, int64(v))
+			rc = sqlite3_bind_int64(stmt, idx, int64(v))
 		case int32:
-			sqlite3_bind_int64(stmt, idx, int64(v))
+			rc = sqlite3_bind_int64(stmt, idx, int64(v))
 		case int64:
-			sqlite3_bind_int64(stmt, idx, v)
+			rc = sqlite3_bind_int64(stmt, idx, v)
 		case bool:
 			if v {
-				sqlite3_bind_int64(stmt, idx, 1)
+				rc = sqlite3_bind_int64(stmt, idx, 1)
 			} else {
-				sqlite3_bind_int64(stmt, idx, 0)
+				rc = sqlite3_bind_int64(stmt, idx, 0)
 			}
 		default:
 			return fmt.Errorf("unsupported bind type %T at arg %d", a, i)
+		}
+		if rc != SQLITE_OK {
+			return fmt.Errorf("bind arg %d rc=%d", i+1, rc)
 		}
 	}
 	return nil
@@ -571,6 +595,8 @@ func readColumn(stmt uintptr, i int32) any {
 	switch sqlite3_column_type(stmt, i) {
 	case COL_INT:
 		return sqlite3_column_int64(stmt, i)
+	case COL_FLOAT:
+		return sqlite3_column_double(stmt, i)
 	case COL_TEXT:
 		return readCString(sqlite3_column_text(stmt, i))
 	case COL_BLOB:

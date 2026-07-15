@@ -68,92 +68,114 @@ function Save-Url([string]$Url, [string]$Path) {
 }
 
 function Test-Sha256([string]$ZipPath, [string]$ShaPath) {
-  if (-not (Test-Path -LiteralPath $ShaPath)) { return }
+  if (-not (Test-Path -LiteralPath $ShaPath)) { throw "checksum file missing after successful download" }
   $tokens = (Get-Content -LiteralPath $ShaPath -Raw) -split '\s+'
-  $expected = $tokens[0].ToLowerInvariant()
-  if ([string]::IsNullOrWhiteSpace($expected)) {
-    throw "empty sha256 file"
+  $expected = [string]$tokens[0]
+  if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "invalid sha256 file"
   }
+  $expected = $expected.ToLowerInvariant()
   $actual = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
   if ($expected -ne $actual) {
     throw "sha256 mismatch for downloaded release zip"
   }
 }
 
-if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-  throw "this installer is for Windows; use scripts/install-release.sh on macOS"
-}
-if (-not [Environment]::Is64BitOperatingSystem) {
-  throw "this release installer supports Windows amd64 only"
-}
-
-$slug = Get-RepoSlug $Repo
-$base = Get-RepoUrl $Repo
-$url = Get-AssetUrl $base $Tag $Asset
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("wechat-cli-install-" + [Guid]::NewGuid().ToString("N"))
-$extract = Join-Path $tmp "extract"
-New-Item -ItemType Directory -Force -Path $extract | Out-Null
-
-try {
-  $zip = Join-Path $tmp $Asset
-  $sha = Join-Path $tmp "$Asset.sha256"
-
-  Write-Step "Downloading wechat-cli release: $url"
+function Confirm-ReleaseChecksum([string]$Url, [string]$ZipPath, [string]$ShaPath) {
   try {
-    Save-Url $url $zip
+    Save-Url "$Url.sha256" $ShaPath
   } catch {
-    Write-Warning "stable asset download failed; querying GitHub release metadata."
-    $fallback = Get-FallbackAssetUrl $slug $Tag
-    if ([string]::IsNullOrWhiteSpace($fallback)) {
-      throw "could not find a windows-amd64 release asset for $slug"
-    }
-    $url = $fallback
-    $zip = Join-Path $tmp (Split-Path ([Uri]$fallback).AbsolutePath -Leaf)
+    Write-Warning "release checksum file not found; continuing without checksum verification."
+    return $false
+  }
+
+  # A downloaded checksum is an integrity assertion. Any parse error or
+  # mismatch must abort instead of being treated like a missing sidecar.
+  Test-Sha256 $ZipPath $ShaPath
+  return $true
+}
+
+function Invoke-ReleaseInstall {
+  if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+    throw "this installer is for Windows; use scripts/install-release.sh on macOS"
+  }
+  $osArch = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+    $env:PROCESSOR_ARCHITEW6432
+  } else {
+    $env:PROCESSOR_ARCHITECTURE
+  }
+  if (-not [Environment]::Is64BitOperatingSystem -or $osArch -ne "AMD64") {
+    throw "this release installer supports Windows amd64 only"
+  }
+
+  $slug = Get-RepoSlug $Repo
+  $base = Get-RepoUrl $Repo
+  $url = Get-AssetUrl $base $Tag $Asset
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wechat-cli-install-" + [Guid]::NewGuid().ToString("N"))
+  $extract = Join-Path $tmp "extract"
+  New-Item -ItemType Directory -Force -Path $extract | Out-Null
+
+  try {
+    $zip = Join-Path $tmp $Asset
+    $sha = Join-Path $tmp "$Asset.sha256"
+
     Write-Step "Downloading wechat-cli release: $url"
-    Save-Url $url $zip
-  }
+    try {
+      Save-Url $url $zip
+    } catch {
+      Write-Warning "stable asset download failed; querying GitHub release metadata."
+      $fallback = Get-FallbackAssetUrl $slug $Tag
+      if ([string]::IsNullOrWhiteSpace($fallback)) {
+        throw "could not find a windows-amd64 release asset for $slug"
+      }
+      $url = $fallback
+      $zip = Join-Path $tmp (Split-Path ([Uri]$fallback).AbsolutePath -Leaf)
+      Write-Step "Downloading wechat-cli release: $url"
+      Save-Url $url $zip
+    }
 
-  try {
-    Save-Url "$url.sha256" $sha
-    Test-Sha256 $zip $sha
-    Write-Step "Verified release checksum."
-  } catch {
-    Write-Warning "release checksum file not found or could not be verified; continuing without checksum verification."
-  }
+    if (Confirm-ReleaseChecksum $url $zip $sha) {
+      Write-Step "Verified release checksum."
+    }
 
-  Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-  $installer = Get-ChildItem -LiteralPath $extract -Filter install.ps1 -Recurse | Select-Object -First 1
-  if ($null -eq $installer) {
-    throw "install.ps1 not found inside release zip"
-  }
+    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+    $installer = Get-ChildItem -LiteralPath $extract -Filter install.ps1 -Recurse | Select-Object -First 1
+    if ($null -eq $installer) {
+      throw "install.ps1 not found inside release zip"
+    }
 
-  $installerArgs = @()
-  if ($Update) {
-    $installerArgs += "-Update"
-  }
-  if ($All) {
-    $installerArgs += "-All"
-  }
-  if ($WithASR) {
-    $installerArgs += "-WithASR"
-  }
-  $installerArgs += "-Yes"
-  if ($DryRun) { $installerArgs += "-DryRun" }
-  if ($Json) { $installerArgs += "-Json" }
-  if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
-    $installerArgs += @("-InstallDir", $InstallDir)
-  }
-  if ($BackgroundRefresh) { $installerArgs += "-BackgroundRefresh" }
+    $installerArgs = @()
+    if ($Update) {
+      $installerArgs += "-Update"
+    }
+    if ($All) {
+      $installerArgs += "-All"
+    }
+    if ($WithASR) {
+      $installerArgs += "-WithASR"
+    }
+    $installerArgs += "-Yes"
+    if ($DryRun) { $installerArgs += "-DryRun" }
+    if ($Json) { $installerArgs += "-Json" }
+    if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
+      $installerArgs += @("-InstallDir", $InstallDir)
+    }
+    if ($BackgroundRefresh) { $installerArgs += "-BackgroundRefresh" }
 
-  Write-Step "Running bundled installer from $($installer.DirectoryName)"
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $installer.FullName @installerArgs
-  if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+    Write-Step "Running bundled installer from $($installer.DirectoryName)"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $installer.FullName @installerArgs
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
+  } finally {
+    if ($KeepDownload) {
+      Write-Step "Keeping download directory: $tmp"
+    } elseif (Test-Path -LiteralPath $tmp) {
+      Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
-} finally {
-  if ($KeepDownload) {
-    Write-Step "Keeping download directory: $tmp"
-  } elseif (Test-Path -LiteralPath $tmp) {
-    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  }
+}
+
+if ($MyInvocation.InvocationName -ne ".") {
+  Invoke-ReleaseInstall
 }

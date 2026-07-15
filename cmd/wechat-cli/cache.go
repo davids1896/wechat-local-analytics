@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/r266-tech/wechat-cli/internal/config"
+	"github.com/r266-tech/wechat-cli/internal/safefile"
 	"github.com/r266-tech/wechat-cli/internal/wcdb"
 	"github.com/r266-tech/wechat-cli/internal/wxkind"
 )
@@ -561,15 +562,28 @@ func acquireCacheRefreshLock() (func(), bool, string, error) {
 		if held == "1" {
 			return func() {}, true, "", nil
 		}
-		_ = os.MkdirAll(held, 0o700)
-		_ = writeCacheRefreshLockOwner(held)
-		return func() { _ = os.RemoveAll(held) }, true, held, nil
+		expected, err := expectedCacheRefreshLockDir()
+		if err != nil {
+			return nil, false, "", err
+		}
+		provided, err := filepath.Abs(filepath.Clean(held))
+		if err != nil || !samePath(provided, expected) {
+			return nil, false, provided, fmt.Errorf("refusing inherited cache lock outside managed state: %q", held)
+		}
+		info, err := os.Lstat(expected)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, false, expected, fmt.Errorf("inherited cache lock is not a managed directory: %q", expected)
+		}
+		if err := writeCacheRefreshLockOwner(expected); err != nil {
+			return nil, false, expected, err
+		}
+		return func() { _ = os.RemoveAll(expected) }, true, expected, nil
 	}
-	stateDir, err := appStateDir()
+	lockDir, err := expectedCacheRefreshLockDir()
 	if err != nil {
 		return nil, false, "", err
 	}
-	lockDir := filepath.Join(stateDir, "cache-refresh.lock")
+	stateDir := filepath.Dir(lockDir)
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, false, lockDir, err
 	}
@@ -595,6 +609,14 @@ func acquireCacheRefreshLock() (func(), bool, string, error) {
 		}
 	}
 	return nil, false, lockDir, nil
+}
+
+func expectedCacheRefreshLockDir() (string, error) {
+	stateDir, err := appStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(filepath.Join(stateDir, "cache-refresh.lock"))
 }
 
 const cacheRefreshLockOwnerFile = "owner.json"
@@ -794,62 +816,39 @@ func (s *server) snapshotSource(src sourceDBInfo, prev map[string]cacheFileMeta,
 		meta.Reused = true
 		return snapshotResult{meta: meta, statKey: "reused"}
 	}
-	db, err := s.openDBWritable(src.Subdir, src.File, isCriticalCacheSource(src.RelPath))
-	if err != nil {
-		meta.Status = "error"
-		meta.Error = err.Error()
-		return snapshotResult{
-			meta:     meta,
-			statKey:  "snapshot_errors",
-			errorOut: map[string]string{"rel_path": src.RelPath, "error": err.Error()},
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		beforeDB := fileMTimeNanos(src.Source)
+		beforeWAL := fileMTimeNanos(src.Source + "-wal")
+		beforeSalt := readSaltHex(src.Source)
+		db, err := s.openDB(src.Subdir, src.File)
+		if err == nil {
+			err = db.BackupTo(src.Snapshot)
+			db.Close()
 		}
-	}
-	if err := db.BackupTo(src.Snapshot); err != nil {
-		meta.Status = "error"
-		meta.Error = err.Error()
-		db.Close()
-		return snapshotResult{
-			meta:     meta,
-			statKey:  "snapshot_errors",
-			errorOut: map[string]string{"rel_path": src.RelPath, "error": err.Error()},
+		if err != nil {
+			lastErr = err
+			break
 		}
-	}
-	db.Close()
-	meta.DBMTime = fileMTimeNanos(src.Source)
-	meta.WALMTime = fileMTimeNanos(src.Source + "-wal")
-	meta.SaltHex = readSaltHex(src.Source)
-	meta.CopiedAt = time.Now().Unix()
-	return snapshotResult{meta: meta, statKey: "snapshotted"}
-}
-
-func (s *server) openDBWritable(subdir, file string, allowKeyRefresh bool) (*wcdb.DB, error) {
-	if err := s.ensure(); err != nil {
-		return nil, err
-	}
-	if err := wcdb.Bootstrap(s.wcdbPath); err != nil {
-		return nil, err
-	}
-	resolvedDB, err := s.validatedDBPath(subdir, file)
-	if err != nil {
-		return nil, err
-	}
-	if len(s.cfg.Keys) > 0 {
-		db, err := wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
-		if err == nil || !isMissingEncKeyErr(err) || !allowKeyRefresh {
-			return db, err
+		afterDB := fileMTimeNanos(src.Source)
+		afterWAL := fileMTimeNanos(src.Source + "-wal")
+		afterSalt := readSaltHex(src.Source)
+		if beforeDB == afterDB && beforeWAL == afterWAL && beforeSalt == afterSalt {
+			meta.DBMTime = afterDB
+			meta.WALMTime = afterWAL
+			meta.SaltHex = afterSalt
+			meta.CopiedAt = time.Now().Unix()
+			return snapshotResult{meta: meta, statKey: "snapshotted"}
 		}
-		if setupErr := s.refreshKeysFromWxkey(err.Error()); setupErr != nil {
-			return nil, setupErr
-		}
-		return wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
+		lastErr = fmt.Errorf("source changed while snapshotting (attempt %d/3)", attempt+1)
 	}
-	if !allowKeyRefresh {
-		return nil, fmt.Errorf("no schema-2 DB keys cached")
+	meta.Status = "error"
+	meta.Error = lastErr.Error()
+	return snapshotResult{
+		meta:     meta,
+		statKey:  "snapshot_errors",
+		errorOut: map[string]string{"rel_path": src.RelPath, "error": lastErr.Error()},
 	}
-	if err := s.refreshKeysFromWxkey("no schema-2 DB keys cached"); err != nil {
-		return nil, err
-	}
-	return wcdb.OpenWithKeyMapWritable(resolvedDB, s.cfg.Keys)
 }
 
 func listSourceDBs(cfg *config.Config, paths cachePaths) ([]sourceDBInfo, error) {
@@ -859,7 +858,10 @@ func listSourceDBs(cfg *config.Config, paths cachePaths) ([]sourceDBInfo, error)
 	dbStorage := filepath.Join(cfg.DBRoot, "db_storage")
 	var out []sourceDBInfo
 	err := filepath.WalkDir(dbStorage, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
 			return nil
 		}
 		name := d.Name()
@@ -868,7 +870,7 @@ func listSourceDBs(cfg *config.Config, paths cachePaths) ([]sourceDBInfo, error)
 		}
 		rel, err := filepath.Rel(dbStorage, path)
 		if err != nil {
-			return nil
+			return err
 		}
 		rel = filepath.ToSlash(rel)
 		subdir, file := filepath.Split(rel)
@@ -968,23 +970,36 @@ func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[s
 		}
 	}
 	cacheFileInsert.Close()
-	display, contactCount := buildIndexContacts(db, snapshotFor(files, "contact/contact.db"))
+	display, contactCount, err := buildIndexContacts(db, snapshotFor(files, "contact/contact.db"))
+	if err != nil {
+		_ = db.Exec("ROLLBACK")
+		return nil, nil, err
+	}
 	stats["contacts"] = contactCount
-	sessionCount := buildIndexSessions(db, snapshotFor(files, "session/session.db"), display)
+	sessionCount, err := buildIndexSessions(db, snapshotFor(files, "session/session.db"), display)
+	if err != nil {
+		_ = db.Exec("ROLLBACK")
+		return nil, nil, err
+	}
 	stats["sessions"] = sessionCount
-	createIndexSessionIndexes(db)
-	_ = setCacheMeta(db, "refreshed_at", strconv.FormatInt(time.Now().Unix(), 10))
+	if err := createIndexSessionIndexes(db); err != nil {
+		_ = db.Exec("ROLLBACK")
+		return nil, nil, err
+	}
+	if err := setCacheMeta(db, "refreshed_at", strconv.FormatInt(time.Now().Unix(), 10)); err != nil {
+		_ = db.Exec("ROLLBACK")
+		return nil, nil, err
+	}
 	if err := db.Exec("COMMIT"); err != nil {
 		_ = db.Exec("ROLLBACK")
 		return nil, nil, err
 	}
 	db.Close()
-	_ = os.Remove(paths.IndexPath)
-	_ = os.Remove(paths.IndexPath + "-wal")
-	_ = os.Remove(paths.IndexPath + "-shm")
-	if err := os.Rename(tmp, paths.IndexPath); err != nil {
+	if err := safefile.Replace(tmp, paths.IndexPath); err != nil {
 		return nil, nil, err
 	}
+	_ = os.Remove(paths.IndexPath + "-wal")
+	_ = os.Remove(paths.IndexPath + "-shm")
 	return stats, nil, nil
 }
 
@@ -1032,33 +1047,33 @@ func createIndexSchema(db *wcdb.DB) error {
 	`)
 }
 
-func createIndexSessionIndexes(db *wcdb.DB) {
-	_ = db.Exec(`
+func createIndexSessionIndexes(db *wcdb.DB) error {
+	return db.Exec(`
 		CREATE INDEX idx_sessions_sort ON sessions_unified(sort_timestamp DESC);
 	`)
 }
 
-func buildIndexContacts(idx *wcdb.DB, path string) (map[string]string, int64) {
+func buildIndexContacts(idx *wcdb.DB, path string) (map[string]string, int64, error) {
 	display := map[string]string{}
 	if path == "" || !fileExists(path) {
-		return display, 0
+		return display, 0, fmt.Errorf("contact cache snapshot is unavailable")
 	}
 	db, err := wcdb.OpenPlain(path, false)
 	if err != nil {
-		return display, 0
+		return display, 0, fmt.Errorf("open contact cache snapshot: %w", err)
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT username, alias, remark, nick_name,
-		COALESCE(NULLIF(remark, ''), NULLIF(nick_name, ''), username) AS display_name,
-		description, verify_flag FROM contact`)
+			COALESCE(NULLIF(remark, ''), NULLIF(nick_name, ''), username) AS display_name,
+			description, verify_flag FROM contact`)
 	if err != nil {
-		return display, 0
+		return display, 0, fmt.Errorf("query contact cache snapshot: %w", err)
 	}
 	insert, err := idx.Prepare(`INSERT OR REPLACE INTO contacts_unified
-		(username, display_name, nick_name, remark, alias, description, type, is_verified)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+			(username, display_name, nick_name, remark, alias, description, type, is_verified)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		return display, 0
+		return display, 0, fmt.Errorf("prepare contact cache index: %w", err)
 	}
 	defer insert.Close()
 	var n int64
@@ -1069,38 +1084,40 @@ func buildIndexContacts(idx *wcdb.DB, path string) (map[string]string, int64) {
 		}
 		dn := rowString(r, "display_name")
 		display[u] = dn
-		_ = insert.Exec(
+		if err := insert.Exec(
 			u, dn, rowString(r, "nick_name"), rowString(r, "remark"), rowString(r, "alias"),
-			rowString(r, "description"), wxkind.ClassifyUsername(u), rowInt64(r, "verify_flag") != 0)
+			rowString(r, "description"), wxkind.ClassifyUsername(u), rowInt64(r, "verify_flag") != 0); err != nil {
+			return display, n, fmt.Errorf("insert contact %q into cache index: %w", u, err)
+		}
 		n++
 	}
-	return display, n
+	return display, n, nil
 }
 
-func buildIndexSessions(idx *wcdb.DB, path string, display map[string]string) int64 {
+func buildIndexSessions(idx *wcdb.DB, path string, display map[string]string) (int64, error) {
 	if path == "" || !fileExists(path) {
-		return 0
+		return 0, fmt.Errorf("session cache snapshot is unavailable")
 	}
 	db, err := wcdb.OpenPlain(path, false)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("open session cache snapshot: %w", err)
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT username, unread_count, summary,
 		last_timestamp, sort_timestamp,
 		last_msg_sender AS last_sender_wxid, last_sender_display_name,
 		last_msg_type, last_msg_sub_type
-		FROM SessionTable
-		WHERE COALESCE(is_hidden, 0) = 0`)
+			FROM SessionTable
+			WHERE COALESCE(is_hidden, 0) = 0`)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("query session cache snapshot: %w", err)
 	}
 	insert, err := idx.Prepare(`INSERT OR REPLACE INTO sessions_unified
 		(username, display_name, unread_count, summary, last_timestamp, sort_timestamp,
-		 last_sender_wxid, last_sender_display_name, last_msg_type, last_msg_sub_type, last_msg_kind_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			 last_sender_wxid, last_sender_display_name, last_msg_type, last_msg_sub_type, last_msg_kind_name)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("prepare session cache index: %w", err)
 	}
 	defer insert.Close()
 	var n int64
@@ -1114,13 +1131,15 @@ func buildIndexSessions(idx *wcdb.DB, path string, display map[string]string) in
 		bk := rowInt64(r, "last_msg_type")
 		st := rowInt64(r, "last_msg_sub_type")
 		kind := wxkind.Resolve(int32(bk), int32(st))
-		_ = insert.Exec(
+		if err := insert.Exec(
 			u, dn, rowInt64(r, "unread_count"), rowString(r, "summary"), rowInt64(r, "last_timestamp"),
 			rowInt64(r, "sort_timestamp"), emptyToNil(sender), emptyToNil(rowString(r, "last_sender_display_name")),
-			bk, st, kind)
+			bk, st, kind); err != nil {
+			return n, fmt.Errorf("insert session %q into cache index: %w", u, err)
+		}
 		n++
 	}
-	return n
+	return n, nil
 }
 
 func setCacheMeta(db *wcdb.DB, key, value string) error {
@@ -1136,13 +1155,13 @@ func snapshotFor(files []cacheFileMeta, rel string) string {
 	return ""
 }
 
-func (s *server) cacheSessions(a map[string]any) ([]wcdb.Row, bool, error) {
-	db, err := s.openCacheIndex(false)
+func (s *server) cacheSessions(a map[string]any) ([]wcdb.Row, []string, bool, error) {
+	db, warnings, err := s.openCacheIndexWithWarnings()
 	if err != nil {
 		if errors.Is(err, errCacheMissing) {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
-		return nil, false, err
+		return nil, warnings, false, err
 	}
 	defer db.Close()
 	var where []string
@@ -1156,25 +1175,70 @@ func (s *server) cacheSessions(a map[string]any) ([]wcdb.Row, bool, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
-	limit := getInt(a, "limit", 50)
-	fetchLimit := limit
-	if getStr(a, "type_filter") != "" && getStr(a, "type_filter") != "all" {
-		fetchLimit = 2000
-	}
-	args = append(args, fetchLimit)
-	rows, err := db.Query(fmt.Sprintf(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
+	query := fmt.Sprintf(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
 		s.last_sender_wxid, s.last_sender_display_name, s.last_msg_type, s.last_msg_sub_type, s.last_msg_kind_name,
 		c.type AS contact_type, c.is_verified
 		FROM sessions_unified s LEFT JOIN contacts_unified c ON c.username = s.username
-		%s ORDER BY s.sort_timestamp DESC LIMIT ?`, wc), args...)
+		%s ORDER BY s.sort_timestamp DESC, s.username DESC LIMIT ? OFFSET ?`, wc)
+	limit := getInt(a, "limit", 50)
+	offset := maxInt(getInt(a, "offset", 0), 0)
+	typeFilter := getStr(a, "type_filter")
+	rows, err := collectSessionPage(limit, offset, typeFilter, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
+		queryArgs := append(append([]any(nil), args...), fetchLimit, scanOffset)
+		return db.Query(query, queryArgs...)
+	})
 	if err != nil {
-		return nil, false, err
+		return nil, warnings, false, err
 	}
-	rows = decorateSessionRows(rows, getStr(a, "type_filter"))
-	if len(rows) > limit {
-		rows = rows[:limit]
+	return rows, warnings, true, nil
+}
+
+// collectSessionPage applies offset after any chat-type post-filter. CLI
+// callers pass an already over-fetched limit for has_more detection; internal
+// callers receive exactly the limit they requested. It scans to source
+// exhaustion instead of treating an arbitrary scan cap as the end.
+func collectSessionPage(limit, offset int, typeFilter string, fetch func(limit, offset int) ([]wcdb.Row, error)) ([]wcdb.Row, error) {
+	if limit <= 0 {
+		limit = 50
 	}
-	return rows, true, nil
+	if offset < 0 {
+		offset = 0
+	}
+	want := limit
+	needsPostFilter := strings.TrimSpace(typeFilter) != "" && strings.TrimSpace(typeFilter) != "all"
+	if !needsPostFilter {
+		rows, err := fetch(want, offset)
+		if err != nil {
+			return nil, err
+		}
+		return decorateSessionRows(rows, typeFilter), nil
+	}
+
+	batchSize := maxInt(500, want*4)
+	var out []wcdb.Row
+	matchedBeforePage := 0
+	for scanOffset := 0; ; {
+		batch, err := fetch(batchSize, scanOffset)
+		if err != nil {
+			return nil, err
+		}
+		rawCount := len(batch)
+		batch = decorateSessionRows(batch, typeFilter)
+		for _, row := range batch {
+			if matchedBeforePage < offset {
+				matchedBeforePage++
+				continue
+			}
+			out = append(out, row)
+			if len(out) >= want {
+				return out, nil
+			}
+		}
+		if rawCount < batchSize {
+			return out, nil
+		}
+		scanOffset += rawCount
+	}
 }
 
 func decorateMessageSearchRows(rows []wcdb.Row) {
@@ -1187,50 +1251,33 @@ func decorateMessageSearchRows(rows []wcdb.Row) {
 }
 
 func (s *server) toolUnread(a map[string]any) (any, error) {
-	db, err := s.openCacheIndex(false)
+	db, warnings, err := s.openCacheIndexWithWarnings()
 	if err != nil {
 		if errors.Is(err, errCacheMissing) {
-			raw, err := s.toolSessions(map[string]any{"limit": float64(getInt(a, "limit", 1000))})
-			if err != nil {
-				return nil, err
-			}
-			rows, ok := raw.([]wcdb.Row)
-			if !ok {
-				return nil, fmt.Errorf("sessions returned unexpected type %T", raw)
-			}
-			var out []wcdb.Row
-			for _, r := range rows {
-				if rowInt64(r, "unread_count") > 0 {
-					out = append(out, r)
-				}
-			}
-			return out, nil
+			args := copyToolArgs(a)
+			args["unread_only"] = true
+			return s.toolSessions(args)
 		}
 		return nil, err
 	}
 	defer db.Close()
 	limit := getInt(a, "limit", 50)
-	fetchLimit := limit
-	if getStr(a, "type_filter") != "" || getStr(a, "filter") != "" {
-		fetchLimit = 2000
-	}
+	offset := getInt(a, "offset", 0)
 	tf := getStr(a, "type_filter")
 	if tf == "" {
 		tf = getStr(a, "filter")
 	}
-	rows, err := db.Query(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
+	rows, err := collectSessionPage(limit, offset, tf, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
+		return db.Query(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
 		s.last_sender_wxid, s.last_sender_display_name, s.last_msg_type, s.last_msg_sub_type, s.last_msg_kind_name,
 		c.type AS contact_type, c.is_verified
 		FROM sessions_unified s LEFT JOIN contacts_unified c ON c.username = s.username
-		WHERE s.unread_count > 0 ORDER BY s.sort_timestamp DESC LIMIT ?`, fetchLimit)
+		WHERE s.unread_count > 0 ORDER BY s.sort_timestamp DESC, s.username DESC LIMIT ? OFFSET ?`, fetchLimit, scanOffset)
+	})
 	if err != nil {
 		return nil, err
 	}
-	rows = decorateSessionRows(rows, tf)
-	if len(rows) > limit {
-		rows = rows[:limit]
-	}
-	return rows, nil
+	return sessionRowsResult(rows, "metadata_cache_sessions", warnings), nil
 }
 
 func (s *server) toolStats(a map[string]any) (any, error) {

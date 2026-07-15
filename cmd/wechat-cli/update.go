@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	releaseInstallShellURL      = "https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh"
-	releaseInstallPowerShellURL = "https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1"
+	releaseInstallShellURL      = "https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh"
+	releaseInstallPowerShellURL = "https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1"
 )
 
 type updateOptions struct {
@@ -25,6 +25,7 @@ type updateOptions struct {
 	Repo         string
 	Tag          string
 	Asset        string
+	InstallDir   string
 }
 
 func runUpdateCLI(args []string, opts cliOptions) {
@@ -96,6 +97,13 @@ func updateArgValue(args []string, idx *int, name string) (string, error) {
 }
 
 func runReleaseUpdate(opts updateOptions) (map[string]any, error) {
+	if strings.TrimSpace(opts.InstallDir) == "" {
+		installDir, err := currentExecutableInstallDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve current install directory: %w", err)
+		}
+		opts.InstallDir = installDir
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return runDarwinReleaseUpdate(opts)
@@ -104,6 +112,29 @@ func runReleaseUpdate(opts updateOptions) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("wechat-cli update supports macOS and Windows releases only, not %s", runtime.GOOS)
 	}
+}
+
+func currentExecutableInstallDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return installDirFromExecutable(exe)
+}
+
+func installDirFromExecutable(exe string) (string, error) {
+	exe = strings.TrimSpace(exe)
+	if exe == "" {
+		return "", fmt.Errorf("executable path is empty")
+	}
+	abs, err := filepath.Abs(exe)
+	if err != nil {
+		return "", err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(abs); resolveErr == nil {
+		abs = resolved
+	}
+	return filepath.Dir(filepath.Clean(abs)), nil
 }
 
 func runDarwinReleaseUpdate(opts updateOptions) (map[string]any, error) {
@@ -155,6 +186,9 @@ func releaseInstallerArgs(opts updateOptions) []string {
 	if opts.Asset != "" {
 		args = append(args, "--asset", opts.Asset)
 	}
+	if opts.InstallDir != "" {
+		args = append(args, "--install-dir", opts.InstallDir)
+	}
 	return args
 }
 
@@ -176,6 +210,7 @@ func startWindowsReleaseUpdate(opts updateOptions) (map[string]any, error) {
 		"-ParentPid", strconv.Itoa(os.Getpid()),
 		"-Url", releaseInstallPowerShellURL,
 		"-LogPath", logPath,
+		"-InstallDir", opts.InstallDir,
 	}
 	if opts.DryRun {
 		args = append(args, "-DryRun")
@@ -259,6 +294,9 @@ func updateResultBase(opts updateOptions) map[string]any {
 	if opts.KeepDownload {
 		query["keep_download"] = true
 	}
+	if opts.InstallDir != "" {
+		query["install_dir"] = opts.InstallDir
+	}
 	return map[string]any{"query": query}
 }
 
@@ -334,6 +372,7 @@ param(
   [string]$Repo = "",
   [string]$Tag = "",
   [string]$Asset = "",
+  [string]$InstallDir = "",
   [switch]$DryRun,
   [switch]$KeepDownload
 )
@@ -364,6 +403,7 @@ try {
   if (-not [string]::IsNullOrWhiteSpace($Repo)) { $installArgs += @("-Repo", $Repo) }
   if (-not [string]::IsNullOrWhiteSpace($Tag)) { $installArgs += @("-Tag", $Tag) }
   if (-not [string]::IsNullOrWhiteSpace($Asset)) { $installArgs += @("-Asset", $Asset) }
+  if (-not [string]::IsNullOrWhiteSpace($InstallDir)) { $installArgs += @("-InstallDir", $InstallDir) }
 
   Write-UpdateLog "Running release updater"
   & powershell @installArgs 2>&1 | Tee-Object -FilePath $LogPath -Append | Out-Null

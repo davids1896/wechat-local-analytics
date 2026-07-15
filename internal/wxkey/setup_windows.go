@@ -197,14 +197,40 @@ func runSetup() (*SetupResult, string, error) {
 		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); ensure WECHAT_CLI_DB_ROOT matches the logged-in account", stats.ScannedProcesses)
 	}
 
-	for salt, key := range verified {
-		cfg.Keys[salt] = key
-	}
-	cfg.SchemaVersion = 2
-	cfg.KeyPID = int(firstHitPID)
-	cfg.KeyEpoch = time.Now().Unix()
-	if err := config.Save(cfg); err != nil {
+	keyEpoch := time.Now().Unix()
+	if err := config.Update(func(current *config.Config) error {
+		if current.DBRoot != "" && !strings.EqualFold(filepath.Clean(current.DBRoot), filepath.Clean(cfg.DBRoot)) {
+			return fmt.Errorf("WeChat account changed during Windows key scan: db_root %q -> %q; retry", cfg.DBRoot, current.DBRoot)
+		}
+		if current.Wxid != "" && cfg.Wxid != "" && current.Wxid != cfg.Wxid {
+			return fmt.Errorf("WeChat account changed during Windows key scan: wxid mismatch; retry")
+		}
+		if current.DBRoot == "" {
+			current.DBRoot = cfg.DBRoot
+		}
+		if current.Wxid == "" {
+			current.Wxid = cfg.Wxid
+		}
+		if current.Keys == nil {
+			current.Keys = map[string]string{}
+		}
+		for salt, key := range verified {
+			current.Keys[salt] = key
+		}
+		if current.SchemaVersion < 2 {
+			current.SchemaVersion = 2
+		}
+		if keyEpoch >= current.KeyEpoch {
+			current.KeyPID = int(firstHitPID)
+			current.KeyEpoch = keyEpoch
+		}
+		return nil
+	}); err != nil {
 		return nil, "", err
+	}
+	cfg, err = config.Load()
+	if err != nil {
+		return nil, "", fmt.Errorf("reload Windows key config: %w", err)
 	}
 	stats.MatchedSalts = len(found)
 	stats.VerifiedDBs = len(results)

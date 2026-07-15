@@ -106,12 +106,27 @@ func (s *server) ensure() error {
 		if err != nil {
 			return fmt.Errorf("未找到微信数据目录 (微信已登录?): %w", err)
 		}
-		cfg.DBRoot = root
-		if cfg.Wxid == "" {
-			cfg.Wxid = wxid
-		}
-		if !strictReadOnlyMode() {
-			_ = config.Save(cfg)
+		if strictReadOnlyMode() {
+			cfg.DBRoot = root
+			if cfg.Wxid == "" {
+				cfg.Wxid = wxid
+			}
+		} else {
+			if err := config.Update(func(current *config.Config) error {
+				if current.DBRoot == "" {
+					current.DBRoot = root
+				}
+				if current.Wxid == "" {
+					current.Wxid = wxid
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("persist detected WeChat account: %w", err)
+			}
+			cfg, err = config.Load()
+			if err != nil {
+				return fmt.Errorf("reload detected WeChat account: %w", err)
+			}
 		}
 	}
 	if !cfg.Ready() {
@@ -166,13 +181,19 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	if s.cfg != nil {
 		beforeCount = len(s.cfg.Keys)
 	}
+	if err := config.Update(func(current *config.Config) error {
+		if err := requireSameConfigAccount(s.cfg, current); err != nil {
+			return err
+		}
+		merged := mergeRuntimeKeyConfig(s.cfg, current)
+		*current = *merged
+		return nil
+	}); err != nil {
+		return fmt.Errorf("persist merged wxkey config: %w", err)
+	}
 	fresh, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("reload config after wxkey setup: %w", err)
-	}
-	fresh = mergeRuntimeKeyConfig(s.cfg, fresh)
-	if err := config.Save(fresh); err != nil {
-		return fmt.Errorf("persist merged wxkey config: %w", err)
 	}
 	if !fresh.Ready() {
 		return fmt.Errorf("wxkey setup completed but config still has no schema-2 enc_key map")
@@ -222,6 +243,19 @@ func mergeRuntimeKeyConfig(oldCfg, fresh *config.Config) *config.Config {
 	return fresh
 }
 
+func requireSameConfigAccount(expected, current *config.Config) error {
+	if expected == nil || current == nil {
+		return nil
+	}
+	if expected.DBRoot != "" && current.DBRoot != "" && !samePath(expected.DBRoot, current.DBRoot) {
+		return fmt.Errorf("config account changed during key refresh: db_root %q -> %q; retry against the active account", expected.DBRoot, current.DBRoot)
+	}
+	if expected.Wxid != "" && current.Wxid != "" && expected.Wxid != current.Wxid {
+		return fmt.Errorf("config account changed during key refresh: wxid mismatch; retry against the active account")
+	}
+	return nil
+}
+
 func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
 	if strictReadOnlyMode() {
 		return fmt.Errorf("strict_read_only: automatic image-key refresh is disabled (%s)", reason)
@@ -259,14 +293,23 @@ func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
 	if img == nil || strings.TrimSpace(img.Key) == "" {
 		return fmt.Errorf("wxkey image-key completed without an image_key")
 	}
+	expected := &config.Config{DBRoot: root}
+	if s.cfg != nil {
+		expected.Wxid = s.cfg.Wxid
+	}
+	if err := config.Update(func(current *config.Config) error {
+		if err := requireSameConfigAccount(expected, current); err != nil {
+			return err
+		}
+		current.ImageKey = strings.TrimSpace(img.Key)
+		current.ImageXORKey = img.XORKey
+		return nil
+	}); err != nil {
+		return fmt.Errorf("save image_key config: %w", err)
+	}
 	fresh, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("reload config after wxkey image-key: %w", err)
-	}
-	fresh.ImageKey = strings.TrimSpace(img.Key)
-	fresh.ImageXORKey = img.XORKey
-	if err := config.Save(fresh); err != nil {
-		return fmt.Errorf("save image_key config: %w", err)
 	}
 	s.cfg = fresh
 	s.ok = fresh.Ready()
@@ -381,8 +424,9 @@ func (s *server) validatedDBPath(subdir, file string) (string, error) {
 var msgShardRE = regexp.MustCompile(`^(message|biz_message)_\d+\.db$`)
 
 type msgShardDB struct {
-	Name string
-	DB   *wcdb.DB
+	Name     string
+	DB       *wcdb.DB
+	Warnings []string
 }
 
 func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
@@ -424,9 +468,15 @@ func (s *server) findMsgDBs(tableName string) ([]msgShardDB, error) {
 			found = append(found, msgShardDB{Name: name, DB: db})
 			continue
 		}
+		if err != nil {
+			openErrs = append(openErrs, fmt.Errorf("%s schema query: %w", name, err))
+		}
 		db.Close()
 	}
 	if len(found) > 0 {
+		if len(openErrs) > 0 {
+			found[0].Warnings = []string{fmt.Sprintf("message_shard_coverage_partial:%d_of_%d_unchecked", len(openErrs), len(shards))}
+		}
 		return found, nil
 	}
 	if len(openErrs) > 0 {
@@ -439,6 +489,14 @@ func closeMsgDBs(shards []msgShardDB) {
 	for _, shard := range shards {
 		shard.DB.Close()
 	}
+}
+
+func msgShardWarnings(shards []msgShardDB) []string {
+	var warnings []string
+	for _, shard := range shards {
+		warnings = appendUniqueStrings(warnings, shard.Warnings...)
+	}
+	return warnings
 }
 
 // ──────────────────── main loop ────────────────────
@@ -456,8 +514,8 @@ func main() {
 // ──────────────────── tool handlers ────────────────────
 
 func (s *server) toolSessions(a map[string]any) (any, error) {
-	if rows, ok, err := s.cacheSessions(a); ok || err != nil {
-		return rows, err
+	if rows, warnings, ok, err := s.cacheSessions(a); ok || err != nil {
+		return sessionRowsResult(rows, "metadata_cache_sessions", warnings), err
 	}
 	db, err := s.openDB("session", "session.db")
 	if err != nil {
@@ -467,7 +525,11 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 	var where []string
 	var args []any
 	where = append(where, "COALESCE(is_hidden, 0) = 0")
-	if tf := getStr(a, "type_filter"); tf != "" && tf != "all" {
+	if getBool(a, "unread_only") {
+		where = append(where, "unread_count > 0")
+	}
+	typeFilter := getStr(a, "type_filter")
+	if tf := typeFilter; tf != "" && tf != "all" {
 		switch tf {
 		case "group":
 			where = append(where, "username LIKE '%@chatroom'")
@@ -500,15 +562,18 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		}
 		where = append(where, "("+strings.Join(clauses, " OR ")+")")
 	}
-	args = append(args, getInt(a, "limit", 50))
-	rows, err := db.Query(fmt.Sprintf(`SELECT username, unread_count, summary,
+	query := fmt.Sprintf(`SELECT username, unread_count, summary,
 		last_timestamp, sort_timestamp,
 		last_msg_sender AS last_sender_wxid, last_sender_display_name,
 		last_msg_type, last_msg_sub_type
 		FROM SessionTable
 		WHERE %s
-		ORDER BY sort_timestamp DESC
-		LIMIT ?`, strings.Join(where, " AND ")), args...)
+		ORDER BY sort_timestamp DESC, username DESC
+		LIMIT ? OFFSET ?`, strings.Join(where, " AND "))
+	rows, err := collectSessionPage(getInt(a, "limit", 50), getInt(a, "offset", 0), typeFilter, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
+		queryArgs := append(append([]any(nil), args...), fetchLimit, scanOffset)
+		return db.Query(query, queryArgs...)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -517,8 +582,6 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		bk, _ := r["last_msg_type"].(int64)
 		st, _ := r["last_msg_sub_type"].(int64)
 		r["last_msg_kind_name"] = wxkind.Resolve(int32(bk), int32(st))
-		u, _ := r["username"].(string)
-		r["chat_type"] = agentChatType(u, wxkind.ClassifyUsername(u), false)
 		// Aggregator sessions (brandsessionholder / brandservicesessionholder)
 		// wrap the real sender in "_$_CUSTOM_USERNAME_PREFIX_$_<aggId>:<realId>".
 		// The aggId is UI-internal noise; keep only the real wxid / gh_ id.
@@ -531,7 +594,23 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 			}
 		}
 	}
-	return rows, nil
+	return sessionRowsResult(rows, "live_session_db", nil), nil
+}
+
+func sessionRowsResult(rows []wcdb.Row, source string, warnings []string) cliRowsResult {
+	status := "ready"
+	if len(warnings) > 0 {
+		status = "degraded"
+	}
+	return cliRowsResult{
+		Rows: rows,
+		Freshness: compactMap(map[string]any{
+			"message_source":        source,
+			"metadata_cache_status": status,
+			"metadata_cache_role":   "session ordering, unread counts, and display names",
+		}),
+		Warnings: warnings,
+	}
 }
 
 const aggSenderPrefix = "_$_CUSTOM_USERNAME_PREFIX_$_"
@@ -588,12 +667,13 @@ func (s *server) toolContacts(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
+	args = append(args, getInt(a, "limit", 50), maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT username, alias, remark, nick_name,
 		COALESCE(NULLIF(remark, ''), NULLIF(nick_name, ''), username) AS display_name,
 		description, verify_flag
 		FROM contact %s
-		ORDER BY nick_name
-		LIMIT %d`, wc, getInt(a, "limit", 50)), args...)
+		ORDER BY nick_name, username
+		LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -645,11 +725,14 @@ func (s *server) toolChatTimeline(a map[string]any) (any, error) {
 }
 
 type messagePageInfo struct {
-	Limit      int
-	Offset     int
-	Returned   int
-	HasMore    bool
-	NextOffset int
+	Limit                 int
+	Offset                int
+	Returned              int
+	HasMore               bool
+	NextOffset            int
+	Cursor                map[string]any
+	Warnings              []string
+	MediaEnrichmentFailed bool
 }
 
 func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, messagePageInfo, string, string, error) {
@@ -661,9 +744,11 @@ func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, message
 	if err != nil {
 		return nil, messagePageInfo{}, "", "", err
 	}
+	page.Cursor = messageCursorMeta(rows)
 	if includeMediaPathsForMessages(a) {
 		if err := s.enrichMessageMediaResources(rows); err != nil {
-			return nil, messagePageInfo{}, "", "", err
+			page.MediaEnrichmentFailed = true
+			page.Warnings = appendUniqueStrings(page.Warnings, "media_enrichment_failed: "+err.Error())
 		}
 	}
 	displayOrder, err := messagesDisplayOrder(a)
@@ -671,6 +756,9 @@ func (s *server) loadMessageRowsForOutput(a map[string]any) ([]wcdb.Row, message
 		return nil, messagePageInfo{}, "", "", err
 	}
 	applyMessageDisplayOrder(rows, displayOrder)
+	for _, row := range rows {
+		delete(row, "sort_seq")
+	}
 	page.Returned = len(rows)
 	if page.HasMore {
 		page.NextOffset = page.Offset + page.Returned
@@ -705,7 +793,8 @@ func copyToolArgs(a map[string]any) map[string]any {
 func messageTimelineEnvelope(args map[string]any, rows []wcdb.Row, messages []map[string]any, page messagePageInfo, queryOrder, displayOrder string) map[string]any {
 	return compactMap(map[string]any{
 		"query":     chatTimelineQueryMeta(args, rows, page, queryOrder, displayOrder, len(messages)),
-		"freshness": chatTimelineFreshnessMeta(args, rows),
+		"freshness": chatTimelineFreshnessMeta(args, rows, page),
+		"warnings":  page.Warnings,
 		"messages":  messages,
 	})
 }
@@ -754,18 +843,23 @@ func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePag
 		meta["oldest_time"] = oldest
 		meta["newest_time"] = newest
 	}
-	if cursor := messageCursorMeta(rows); len(cursor) > 0 {
+	cursor := page.Cursor
+	if len(cursor) == 0 {
+		cursor = messageCursorMeta(rows)
+	}
+	if len(cursor) > 0 {
 		meta["cursor"] = cursor
 	}
 	_ = queryOrder
 	return meta
 }
 
-func chatTimelineFreshnessMeta(args map[string]any, rows []wcdb.Row) map[string]any {
+func chatTimelineFreshnessMeta(args map[string]any, rows []wcdb.Row, page messagePageInfo) map[string]any {
 	meta := compactMap(map[string]any{
-		"message_source":      "live_message_db",
-		"metadata_cache_role": metadataCacheRole(args),
-		"last_message_time":   newestMessageTime(rows),
+		"message_source":            "live_message_db",
+		"metadata_cache_role":       metadataCacheRole(args),
+		"last_message_time":         newestMessageTime(rows),
+		"media_enrichment_complete": !page.MediaEnrichmentFailed,
 	})
 	return meta
 }
@@ -830,8 +924,12 @@ func messageCursorMeta(rows []wcdb.Row) map[string]any {
 }
 
 func messageRowLess(a, b wcdb.Row) bool {
-	at := rowInt64(a, "create_time")
-	bt := rowInt64(b, "create_time")
+	at := rowInt64(a, "sort_seq")
+	bt := rowInt64(b, "sort_seq")
+	if at == 0 && bt == 0 {
+		at = rowInt64(a, "create_time")
+		bt = rowInt64(b, "create_time")
+	}
 	if at != bt {
 		return at < bt
 	}
@@ -888,8 +986,12 @@ func applyMessageDisplayOrder(rows []wcdb.Row, order string) {
 	}
 	asc := order == "asc"
 	sort.SliceStable(rows, func(i, j int) bool {
-		ti := rowInt64(rows[i], "create_time")
-		tj := rowInt64(rows[j], "create_time")
+		ti := rowInt64(rows[i], "sort_seq")
+		tj := rowInt64(rows[j], "sort_seq")
+		if ti == 0 && tj == 0 {
+			ti = rowInt64(rows[i], "create_time")
+			tj = rowInt64(rows[j], "create_time")
+		}
 		if ti != tj {
 			if asc {
 				return ti < tj
@@ -922,6 +1024,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		return nil, messagePageInfo{}, err
 	}
 	defer closeMsgDBs(shards)
+	shardWarnings := msgShardWarnings(shards)
 
 	sender := ""
 	if senderArg := getStr(a, "sender"); senderArg != "" {
@@ -970,7 +1073,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	}
 	limit := getInt(a, "limit", 50)
 	offset := getInt(a, "offset", 0)
-	page := messagePageInfo{Limit: limit, Offset: offset}
+	page := messagePageInfo{Limit: limit, Offset: offset, Warnings: shardWarnings}
 	fetchLimit := limit
 	if fetchLimit > 0 {
 		fetchLimit++
@@ -979,9 +1082,6 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	sqlLimit := fetchLimit + offset
 	if sqlLimit <= 0 {
 		sqlLimit = fetchLimit
-	}
-	if kw != "" {
-		sqlLimit = 5000
 	}
 
 	var rows []wcdb.Row
@@ -1011,26 +1111,63 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		if len(shardWhere) > 0 {
 			shardWC = "WHERE " + strings.Join(shardWhere, " AND ")
 		}
-		shardArgs = append(shardArgs, sqlLimit, 0)
-		shardRows, err := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
+		query := fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
 			real_sender_id, create_time, status, message_content, source
 			FROM %s %s
 			ORDER BY %s
-			LIMIT ? OFFSET ?`, quoteIdent(tableName), shardWC, order), shardArgs...)
+			LIMIT ? OFFSET ?`, quoteIdent(tableName), shardWC, order)
+		processRows := func(batch []wcdb.Row) []wcdb.Row {
+			if n2i != nil {
+				batch = resolveSenders(batch, n2i)
+			}
+			batch = enrichMessages(decodeFields(batch, "message_content", "source"))
+			for _, r := range batch {
+				r["talker"] = talker
+				r["chat_type"] = agentChatType(talker, wxkind.ClassifyUsername(talker), false)
+				baseKind, subtype, kindName := wxkind.Unpack(rowInt64(r, "local_type"))
+				r["base_kind"] = baseKind
+				r["subtype"] = subtype
+				r["kind_name"] = kindName
+			}
+			return batch
+		}
+		var shardRows []wcdb.Row
+		if kw == "" {
+			queryArgs := append(append([]any(nil), shardArgs...), sqlLimit, 0)
+			shardRows, err = shard.DB.Query(query, queryArgs...)
+			if err == nil {
+				shardRows = processRows(shardRows)
+			}
+		} else {
+			const scanBatchSize = 2000
+			matchTarget := offset + fetchLimit
+			if matchTarget <= 0 {
+				matchTarget = 1
+			}
+			for scanOffset := 0; ; {
+				queryArgs := append(append([]any(nil), shardArgs...), scanBatchSize, scanOffset)
+				var batch []wcdb.Row
+				batch, err = shard.DB.Query(query, queryArgs...)
+				if err != nil {
+					break
+				}
+				rawCount := len(batch)
+				batch = processRows(batch)
+				for _, r := range batch {
+					content, _ := r["message_content"].(string)
+					summary, _ := r["content_summary"].(string)
+					if strings.Contains(content, kw) || strings.Contains(summary, kw) {
+						shardRows = append(shardRows, r)
+					}
+				}
+				if rawCount < scanBatchSize || len(shardRows) >= matchTarget {
+					break
+				}
+				scanOffset += rawCount
+			}
+		}
 		if err != nil {
 			return nil, messagePageInfo{}, fmt.Errorf("%s: %w", shard.Name, err)
-		}
-		if n2i != nil {
-			shardRows = resolveSenders(shardRows, n2i)
-		}
-		shardRows = enrichMessages(decodeFields(shardRows, "message_content", "source"))
-		for _, r := range shardRows {
-			r["talker"] = talker
-			r["chat_type"] = agentChatType(talker, wxkind.ClassifyUsername(talker), false)
-			baseKind, subtype, kindName := wxkind.Unpack(rowInt64(r, "local_type"))
-			r["base_kind"] = baseKind
-			r["subtype"] = subtype
-			r["kind_name"] = kindName
 		}
 		rows = append(rows, shardRows...)
 	}
@@ -1077,7 +1214,6 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 			r["server_id_str"] = strconv.FormatInt(sid, 10)
 		}
 		delete(r, "real_sender_id")
-		delete(r, "sort_seq")
 		delete(r, "status")
 		delete(r, "source")
 		delete(r, "local_type")
@@ -3393,7 +3529,7 @@ func (s *server) toolMediaResources(a map[string]any) (any, error) {
 		WHERE %s
 		GROUP BY c.user_name, sn.user_name, i.message_local_type, i.message_create_time,
 			i.message_local_id, i.message_svr_id, i.message_origin_source, i.packed_info
-		ORDER BY i.message_create_time DESC, i.message_local_id DESC
+		ORDER BY i.message_create_time DESC, i.message_local_id DESC, c.user_name DESC, message_id DESC
 		LIMIT ? OFFSET ?
 	)
 	SELECT f.message_id, f.talker, f.sender_wxid, f.message_local_type,
@@ -3406,7 +3542,7 @@ func (s *server) toolMediaResources(a map[string]any) (any, error) {
 	FROM filtered f
 	JOIN MessageResourceDetail d ON d.message_id = f.message_id
 	%s
-	ORDER BY f.message_create_time DESC, f.message_local_id DESC, d.resource_id ASC`, wc, outerWC), queryArgs...)
+	ORDER BY f.message_create_time DESC, f.message_local_id DESC, f.talker DESC, f.message_id DESC, d.resource_id ASC`, wc, outerWC), queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -4687,7 +4823,11 @@ func voiceTranscriptCacheUsable(cached map[string]any) bool {
 		return false
 	}
 	version, ok := integerArgValue(cached["cache_version"])
-	return ok && version == voiceTranscriptCacheVersion
+	if !ok || version != voiceTranscriptCacheVersion {
+		return false
+	}
+	status, _ := cached["status"].(string)
+	return status == "ok" || status == "no_speech"
 }
 
 func readVoiceTranscriptCache(path string) map[string]any {
@@ -4829,11 +4969,19 @@ func runFasterWhisperVoiceASR(audioPath string) (text, engine, model string, err
 }
 
 func runFasterWhisperVoiceASRWithPython(python, audioPath string) (text, engine, model string, err error) {
-	model = firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_MODEL", "WX_MCP_FASTER_WHISPER_MODEL"), defaultFasterWhisperModel)
-	language := firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_LANGUAGE", "WX_MCP_FASTER_WHISPER_LANGUAGE"), envFirst("WECHAT_CLI_VOICE_LANGUAGE", "WX_MCP_VOICE_LANGUAGE"), "zh")
+	runtimeCfg, _ := loadASRRuntimeConfig()
+	model = firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_MODEL", "WX_MCP_FASTER_WHISPER_MODEL"), runtimeCfg.Model, defaultFasterWhisperModel)
+	language := firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_LANGUAGE", "WX_MCP_FASTER_WHISPER_LANGUAGE"), envFirst("WECHAT_CLI_VOICE_LANGUAGE", "WX_MCP_VOICE_LANGUAGE"), runtimeCfg.Language, "zh")
+	device := firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_DEVICE", "WX_MCP_FASTER_WHISPER_DEVICE"), runtimeCfg.Device, "cpu")
+	computeType := firstNonEmpty(envFirst("WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE", "WX_MCP_FASTER_WHISPER_COMPUTE_TYPE"), runtimeCfg.ComputeType, "int8")
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
-	out, err := exec.CommandContext(ctx, python, "-c", fasterWhisperPythonScript, audioPath, model, language).CombinedOutput()
+	cmd := exec.CommandContext(ctx, python, "-c", fasterWhisperPythonScript, audioPath, model, language)
+	cmd.Env = append(os.Environ(),
+		"WECHAT_CLI_FASTER_WHISPER_DEVICE="+device,
+		"WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE="+computeType,
+	)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", "faster-whisper", model, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -6070,7 +6218,7 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 		JOIN chatroom_member cm ON cm.room_id = cr.id
 		JOIN contact c ON c.id = cm.member_id
 		WHERE cr.username = ?
-		ORDER BY COALESCE(NULLIF(c.remark, ''), c.nick_name, c.username)
+		ORDER BY COALESCE(NULLIF(c.remark, ''), c.nick_name, c.username), c.username
 		LIMIT ? OFFSET ?`, target, getInt(a, "limit", 100), getInt(a, "offset", 0))
 	if err != nil {
 		return nil, err
@@ -6156,55 +6304,59 @@ func (s *server) toolSns(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
-	fetchLimit := limit + offset
-	if afterTS > 0 || beforeTS > 0 {
-		fetchLimit *= 4
-	}
-	if fetchLimit > 2000 {
-		fetchLimit = 2000
-	}
-
-	rows, err := db.Query(
-		fmt.Sprintf("SELECT tid, user_name, content FROM SnsTimeLine %s ORDER BY tid DESC LIMIT %d", wc, fetchLimit),
-		args...)
-	if err != nil {
-		return nil, err
-	}
-
 	var posts []*snsPost
 	var tids []int64
-	skip := offset
-	for _, r := range rows {
-		raw, _ := r["content"].(string)
-		p, perr := parseSnsXML(raw)
-		if perr != nil {
-			// Surface parser drift instead of silently skipping. Counts toward
-			// limit so the agent sees the failure in the same window it asked for.
-			posts = append(posts, &snsPost{ParseError: perr.Error()})
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	batchSize := maxInt(500, limit*4)
+	skipped := 0
+	for scanOffset := 0; len(posts) < limit; {
+		queryArgs := append(append([]any(nil), args...), batchSize, scanOffset)
+		rows, queryErr := db.Query(
+			fmt.Sprintf("SELECT tid, user_name, content FROM SnsTimeLine %s ORDER BY tid DESC LIMIT ? OFFSET ?", wc),
+			queryArgs...)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		rawCount := len(rows)
+		for _, r := range rows {
+			raw, _ := r["content"].(string)
+			p, perr := parseSnsXML(raw)
+			if perr != nil {
+				// Parser drift is part of the ordered result stream rather than a
+				// silent omission, so it participates in offset and limit.
+				if skipped < offset {
+					skipped++
+					continue
+				}
+				posts = append(posts, &snsPost{ParseError: perr.Error()})
+				if len(posts) >= limit {
+					break
+				}
+				continue
+			}
+			if p == nil || (afterTS > 0 && p.CreateTime < afterTS) || (beforeTS > 0 && p.CreateTime >= beforeTS) {
+				continue
+			}
+			if skipped < offset {
+				skipped++
+				continue
+			}
+			tid, _ := r["tid"].(int64)
+			tids = append(tids, tid)
+			posts = append(posts, p)
 			if len(posts) >= limit {
 				break
 			}
-			continue
 		}
-		if p == nil {
-			continue
-		}
-		if afterTS > 0 && p.CreateTime < afterTS {
-			continue
-		}
-		if beforeTS > 0 && p.CreateTime >= beforeTS {
-			continue
-		}
-		if skip > 0 {
-			skip--
-			continue
-		}
-		tid, _ := r["tid"].(int64)
-		tids = append(tids, tid)
-		posts = append(posts, p)
-		if len(posts) >= limit {
+		if rawCount < batchSize {
 			break
 		}
+		scanOffset += rawCount
 	}
 
 	if len(posts) > 0 {
@@ -6274,10 +6426,10 @@ func (s *server) toolSnsNotifications(a map[string]any) (any, error) {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
 	limit := getInt(a, "limit", 50)
-	args = append(args, limit)
+	args = append(args, limit, maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT local_id, create_time, type, feed_id, is_unread,
 		from_username, from_nickname, to_username, to_nickname, content
-		FROM SnsMessage_tmp3 %s ORDER BY create_time DESC, local_id DESC LIMIT ?`, wc), args...)
+		FROM SnsMessage_tmp3 %s ORDER BY create_time DESC, local_id DESC LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6354,7 +6506,7 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 	}
 	limit := getInt(a, "limit", 20)
 	offset := getInt(a, "offset", 0)
-	like := "%" + kw + "%"
+	like := "%" + escapeSQLLikeLiteral(kw) + "%"
 
 	// search_mode is kept for compatibility, but all modes use WeChat's live
 	// FTS content DB. wechat-cli intentionally does not globally scan every Msg_*
@@ -6385,10 +6537,17 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		var ok bool
 		sessionID, ok = talkerToID[talker]
 		if !ok {
-			return []wcdb.Row{}, nil
+			return searchRowsResult(nil, true, nil), nil
 		}
 	}
-	subWhere := []string{"c0 LIKE ?"}
+	tables, err := discoverFTSContentTables(db)
+	if err != nil {
+		return nil, err
+	}
+	if len(tables) == 0 {
+		return nil, fmt.Errorf("no supported message FTS content tables found")
+	}
+	subWhere := []string{`c0 LIKE ? ESCAPE '\'`}
 	subArgs := []any{like}
 	if sessionID != 0 {
 		subWhere = append(subWhere, "c4 = ?")
@@ -6411,51 +6570,120 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		subArgs = append(subArgs, ts)
 	}
 	whereSQL := strings.Join(subWhere, " AND ")
-	fetchLimit := limit + offset
-	if searchNeedsPostFilter(a) {
-		fetchLimit = (limit + offset) * 20
-		if fetchLimit < 200 {
-			fetchLimit = 200
+	query := searchFTSQuery(tables, whereSQL)
+	needsPostFilter := searchNeedsPostFilter(a)
+	desired := limit + 1
+	queryOffset := offset
+	batchSize := desired
+	if needsPostFilter {
+		desired = offset + limit + 1
+		queryOffset = 0
+		batchSize = maxInt(500, minInt(desired*4, 5000))
+	}
+	if batchSize <= 0 {
+		batchSize = 21
+	}
+	const maxPostFilterScan = 50000
+	rows := make([]wcdb.Row, 0, desired)
+	var warnings []string
+	complete := true
+	for scanned := 0; ; {
+		remainingBudget := maxPostFilterScan - scanned
+		fetch := batchSize
+		if needsPostFilter && fetch > remainingBudget {
+			fetch = remainingBudget
 		}
-		if fetchLimit > 5000 {
-			fetchLimit = 5000
+		if fetch <= 0 {
+			complete = false
+			warnings = appendUniqueStrings(warnings, "search_scan_truncated_after_50000_rows")
+			break
+		}
+		var qargs []any
+		for range tables {
+			qargs = append(qargs, subArgs...)
+		}
+		qargs = append(qargs, fetch, queryOffset+scanned)
+		batch, queryErr := db.Query(query, qargs...)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		rawCount := len(batch)
+		for _, r := range batch {
+			sid, _ := r["session_id"].(int64)
+			r["talker"] = idToTalker[sid]
+			delete(r, "session_id")
+		}
+		enrichmentWarnings := s.enrichSearchSender(batch)
+		warnings = appendUniqueStrings(warnings, enrichmentWarnings...)
+		if needsPostFilter && len(enrichmentWarnings) > 0 {
+			return nil, fmt.Errorf("search post-filter completeness could not be guaranteed: %s", strings.Join(enrichmentWarnings, ", "))
+		}
+		s.attachDisplayNames(batch,
+			[2]string{"talker", "talker_display_name"},
+			[2]string{"sender_wxid", "sender_display_name"})
+		decorateMessageSearchRows(batch)
+		batch = filterLiveSearchRows(batch, a, sender)
+		rows = append(rows, batch...)
+		scanned += rawCount
+		if !needsPostFilter || rawCount < fetch || len(rows) >= desired {
+			break
+		}
+		if scanned >= maxPostFilterScan {
+			complete = false
+			warnings = appendUniqueStrings(warnings, "search_scan_truncated_after_50000_rows")
+			break
 		}
 	}
+	if needsPostFilter {
+		if offset < len(rows) {
+			rows = rows[offset:]
+		} else {
+			rows = nil
+		}
+	}
+	return searchRowsResult(rows, complete && len(warnings) == 0, warnings), nil
+}
 
-	// UNION ALL across 4 FTS content partitions then global ORDER BY.
-	// Previous impl looped 0..3 and early-stopped when len(results) >= limit,
-	// which could miss newer messages living in later partitions.
-	// c0=text, c1=local_id, c2=sort_seq, c4=session_id, c6=create_time
-	query := `SELECT * FROM (
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_0_content WHERE ` + whereSQL + `
-		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_1_content WHERE ` + whereSQL + `
-		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_2_content WHERE ` + whereSQL + `
-		UNION ALL
-		SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM message_fts_v4_3_content WHERE ` + whereSQL + `
-	) ORDER BY create_time DESC LIMIT ?`
-	var qargs []any
-	for i := 0; i < 4; i++ {
-		qargs = append(qargs, subArgs...)
-	}
-	qargs = append(qargs, fetchLimit)
-	rows, err := db.Query(query, qargs...)
+var ftsContentTableRE = regexp.MustCompile(`^message_fts_v4_[0-9]+_content$`)
+
+func discoverFTSContentTables(db *wcdb.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'message_fts_v4_%_content' ORDER BY name`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("discover message FTS partitions: %w", err)
 	}
-	for _, r := range rows {
-		sid, _ := r["session_id"].(int64)
-		r["talker"] = idToTalker[sid]
-		delete(r, "session_id")
+	var tables []string
+	for _, row := range rows {
+		name := rowString(row, "name")
+		if ftsContentTableRE.MatchString(name) {
+			tables = append(tables, name)
+		}
 	}
-	s.enrichSearchSender(rows)
-	s.attachDisplayNames(rows,
-		[2]string{"talker", "talker_display_name"},
-		[2]string{"sender_wxid", "sender_display_name"})
-	decorateMessageSearchRows(rows)
-	rows = filterLiveSearchRows(rows, a, sender)
-	return sliceSearchRows(rows, offset, limit), nil
+	return tables, nil
+}
+
+func searchFTSQuery(tables []string, whereSQL string) string {
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		parts = append(parts, `SELECT c0 AS content, c1 AS local_id, c4 AS session_id, c6 AS create_time FROM `+quoteIdent(table)+` WHERE `+whereSQL)
+	}
+	return `SELECT * FROM (` + strings.Join(parts, ` UNION ALL `) + `) ORDER BY create_time DESC, session_id DESC, local_id DESC LIMIT ? OFFSET ?`
+}
+
+func escapeSQLLikeLiteral(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
+}
+
+func searchRowsResult(rows []wcdb.Row, complete bool, warnings []string) cliRowsResult {
+	return cliRowsResult{
+		Rows: rows,
+		Freshness: map[string]any{
+			"message_source": "live_message_fts_db",
+			"complete":       complete,
+		},
+		Warnings: warnings,
+	}
 }
 
 func sliceSearchRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
@@ -6543,7 +6771,7 @@ func messageKindNameMatches(want, got string, baseKind int64) bool {
 // search hits by joining each (talker, local_id) back to its Msg_<hash> shard.
 // Groups rows by talker → one IN query per talker; missing rows leave the
 // fields absent so caller can distinguish "not enriched" from "no value".
-func (s *server) enrichSearchSender(rows []wcdb.Row) {
+func (s *server) enrichSearchSender(rows []wcdb.Row) []string {
 	byTalker := make(map[string][]int64)
 	for _, r := range rows {
 		t, _ := r["talker"].(string)
@@ -6559,12 +6787,15 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) {
 		kindName   string
 	}
 	metaByKey := make(map[string]meta)
+	failedLookups := 0
 	for talker, lids := range byTalker {
 		tableName := "Msg_" + talkerHash(talker)
 		shards, err := s.findMsgDBs(tableName)
 		if err != nil {
+			failedLookups++
 			continue
 		}
+		failedLookups += len(msgShardWarnings(shards))
 		ph := make([]string, len(lids))
 		args := make([]any, len(lids))
 		for i, lid := range lids {
@@ -6572,11 +6803,15 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) {
 			args[i] = lid
 		}
 		for _, shard := range shards {
-			n2i, _ := loadName2Id(shard.DB)
+			n2i, nameErr := loadName2Id(shard.DB)
+			if nameErr != nil {
+				failedLookups++
+			}
 			metaRows, qerr := shard.DB.Query(fmt.Sprintf(
 				"SELECT local_id, real_sender_id, local_type FROM %s WHERE local_id IN (%s)",
 				tableName, strings.Join(ph, ",")), args...)
 			if qerr != nil {
+				failedLookups++
 				continue
 			}
 			for _, mr := range metaRows {
@@ -6604,14 +6839,20 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) {
 			r["kind_name"] = m.kindName
 		}
 	}
+	if failedLookups > 0 {
+		return []string{fmt.Sprintf("search_enrichment_partial:%d_lookup_errors", failedLookups)}
+	}
+	return nil
 }
 
 func (s *server) toolSQL(a map[string]any) (any, error) {
-	q := getStr(a, "query")
-	if q == "" {
+	rawQuery := getStr(a, "query")
+	if rawQuery == "" {
 		return nil, fmt.Errorf("query is required")
 	}
-	q, err := boundedReadSQL(q, getInt(a, "limit", 200))
+	limit := getInt(a, "limit", 200)
+	offset := maxInt(getInt(a, "offset", 0), 0)
+	q, err := boundedReadSQLPage(rawQuery, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -6628,7 +6869,29 @@ func (s *server) toolSQL(a map[string]any) (any, error) {
 		return nil, err
 	}
 	defer db.Close()
-	return db.Query(q)
+	rows, err := db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	verb := strings.ToLower(strings.Fields(strings.TrimSpace(rawQuery))[0])
+	if verb == "pragma" || verb == "explain" {
+		rows = sliceDiagnosticSQLRows(rows, offset, limit)
+	}
+	return rows, nil
+}
+
+func sliceDiagnosticSQLRows(rows []wcdb.Row, offset, limit int) []wcdb.Row {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(rows) {
+		return nil
+	}
+	rows = rows[offset:]
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
 }
 
 func (s *server) toolTransfers(a map[string]any) (any, error) {
@@ -6659,15 +6922,15 @@ func (s *server) toolTransfers(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
-	args = append(args, getInt(a, "limit", 50))
+	args = append(args, getInt(a, "limit", 50), maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT transfer_id, transcation_id,
 		session_name AS session_username,
 		pay_payer AS payer_wxid, pay_receiver AS receiver_wxid, pay_sub_type,
 		begin_transfer_time, invalid_time, last_modified_time,
 		message_server_id
 		FROM transferTable %s
-		ORDER BY begin_transfer_time DESC
-		LIMIT ?`, wc), args...)
+		ORDER BY begin_transfer_time DESC, transfer_id DESC
+		LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6777,18 +7040,24 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
+	offset := maxInt(getInt(a, "offset", 0), 0)
 	fetchLimit := limit
+	queryOffset := offset
 	if needsMessageMeta {
-		fetchLimit = 50000
+		// create_time lives in message shards, so the general DB cannot safely
+		// apply the time filter or offset. Read the complete filtered source,
+		// then sort/page after joining live message metadata.
+		fetchLimit = -1
+		queryOffset = 0
 	}
-	args = append(args, fetchLimit)
+	args = append(args, fetchLimit, queryOffset)
 	rows, err := db.Query(fmt.Sprintf(`SELECT send_id,
 			sender_user_name AS sender_wxid,
 			session_name AS session_username,
 			native_url, message_server_id
 			FROM redEnvelopeTable %s
 			ORDER BY rowid DESC
-			LIMIT ?`, wc), args...)
+			LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6824,6 +7093,11 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 			}
 			return rowInt64(filtered[i], "message_server_id") > rowInt64(filtered[j], "message_server_id")
 		})
+		if offset < len(filtered) {
+			filtered = filtered[offset:]
+		} else {
+			filtered = nil
+		}
 		if len(filtered) > limit {
 			filtered = filtered[:limit]
 		}
@@ -6882,14 +7156,14 @@ func (s *server) toolFavorites(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
-	args = append(args, getInt(a, "limit", 50))
+	args = append(args, getInt(a, "limit", 50), maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT server_id,
 		type AS type_id, update_time, source_id, content,
 		fromusr AS from_wxid,
 		realchatname AS source_chat_username
 		FROM fav_db_item %s
-		ORDER BY update_time DESC
-		LIMIT ?`, wc), args...)
+		ORDER BY update_time DESC, server_id DESC
+		LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -6956,15 +7230,15 @@ func (s *server) toolChatroomAnnouncements(a map[string]any) (any, error) {
 		where = append(where, "announcement_publish_time_ < ?")
 		args = append(args, ts)
 	}
-	args = append(args, limit)
+	args = append(args, limit, maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT username_ AS chatroom_id,
 		announcement_ AS announcement,
 		announcement_editor_ AS editor_wxid,
 		announcement_publish_time_ AS publish_time
 		FROM chat_room_info_detail
 		WHERE %s
-		ORDER BY announcement_publish_time_ DESC
-		LIMIT ?`, strings.Join(where, " AND ")), args...)
+		ORDER BY announcement_publish_time_ DESC, username_ DESC
+		LIMIT ? OFFSET ?`, strings.Join(where, " AND ")), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -7001,14 +7275,7 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 	// don't collapse into each other, and non-shard dbs (message_fts.db,
 	// message_resource.db) stay separate.
 	shardRE := regexp.MustCompile(`^(.+)_\d+\.db$`)
-	type out struct {
-		Subdir     string   `json:"subdir"`
-		File       string   `json:"file"`
-		ShardCount int      `json:"shard_count,omitempty"`
-		Tables     []string `json:"tables,omitempty"`
-		Error      string   `json:"error,omitempty"`
-	}
-	var result []out
+	var result []wcdb.Row
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -7016,7 +7283,7 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 		sub := e.Name()
 		files, err := os.ReadDir(filepath.Join(dbRoot, sub))
 		if err != nil {
-			result = append(result, out{Subdir: sub, Error: err.Error()})
+			result = append(result, schemaSummaryRow(sub, "", 0, nil, err))
 			continue
 		}
 		// Group shard families by prefix; keep non-shard dbs as individuals.
@@ -7048,7 +7315,7 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 		listFile := func(name string, shardCount int) {
 			db, err := s.openDB(sub, name)
 			if err != nil {
-				result = append(result, out{Subdir: sub, File: name, ShardCount: shardCount, Error: err.Error()})
+				result = append(result, schemaSummaryRow(sub, name, shardCount, nil, err))
 				return
 			}
 			rows, err := db.Query(`SELECT name FROM sqlite_master
@@ -7056,7 +7323,7 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 				ORDER BY name`)
 			db.Close()
 			if err != nil {
-				result = append(result, out{Subdir: sub, File: name, ShardCount: shardCount, Error: err.Error()})
+				result = append(result, schemaSummaryRow(sub, name, shardCount, nil, err))
 				return
 			}
 			tables := make([]string, 0, len(rows))
@@ -7065,9 +7332,15 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 					tables = append(tables, n)
 				}
 			}
-			result = append(result, out{Subdir: sub, File: name, ShardCount: shardCount, Tables: tables})
+			result = append(result, schemaSummaryRow(sub, name, shardCount, tables, nil))
 		}
-		for _, fam := range families {
+		familyNames := make([]string, 0, len(families))
+		for name := range families {
+			familyNames = append(familyNames, name)
+		}
+		sort.Strings(familyNames)
+		for _, familyName := range familyNames {
+			fam := families[familyName]
 			listFile(fam.canonical, fam.count)
 		}
 		for _, name := range singles {
@@ -7075,6 +7348,23 @@ func (s *server) toolSchema(a map[string]any) (any, error) {
 		}
 	}
 	return result, nil
+}
+
+func schemaSummaryRow(subdir, file string, shardCount int, tables []string, rowErr error) wcdb.Row {
+	row := wcdb.Row{"subdir": subdir}
+	if file != "" {
+		row["file"] = file
+	}
+	if shardCount > 0 {
+		row["shard_count"] = shardCount
+	}
+	if len(tables) > 0 {
+		row["tables"] = tables
+	}
+	if rowErr != nil {
+		row["error"] = rowErr.Error()
+	}
+	return row
 }
 
 func (s *server) toolForwardHistory(a map[string]any) (any, error) {
@@ -7105,11 +7395,11 @@ func (s *server) toolForwardHistory(a map[string]any) (any, error) {
 	if len(where) > 0 {
 		wc = "WHERE " + strings.Join(where, " AND ")
 	}
-	args = append(args, getInt(a, "limit", 50))
+	args = append(args, getInt(a, "limit", 50), maxInt(getInt(a, "offset", 0), 0))
 	rows, err := db.Query(fmt.Sprintf(`SELECT username, forward_time
 		FROM ForwardRecent %s
-		ORDER BY forward_time DESC
-		LIMIT ?`, wc), args...)
+		ORDER BY forward_time DESC, username DESC
+		LIMIT ? OFFSET ?`, wc), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -7367,6 +7657,10 @@ func maxIntegerArg(tool, key string) (int64, bool) {
 }
 
 func boundedReadSQL(q string, limit int) (string, error) {
+	return boundedReadSQLPage(q, limit, 0)
+}
+
+func boundedReadSQLPage(q string, limit, offset int) (string, error) {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return "", fmt.Errorf("query is required")
@@ -7385,8 +7679,13 @@ func boundedReadSQL(q string, limit int) (string, error) {
 		if limit <= 0 {
 			limit = 200
 		}
-		if limit > 1000 {
-			limit = 1000
+		// Public schema caps requested rows at 1000. The extra row is the
+		// generic list envelope's has_more sentinel.
+		if limit > 1001 {
+			limit = 1001
+		}
+		if offset > 0 {
+			return fmt.Sprintf("SELECT * FROM (%s) LIMIT %d OFFSET %d", q, limit, offset), nil
 		}
 		return fmt.Sprintf("SELECT * FROM (%s) LIMIT %d", q, limit), nil
 	}

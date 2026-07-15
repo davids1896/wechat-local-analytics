@@ -22,20 +22,20 @@ Prefer release bootstrap or latest release zip over a source clone.
 Human-friendly macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh
+curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | zsh
 ```
 
 Agent JSON macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh
+curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh
 ```
 
 Windows:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1 | iex"
 ```
 
 Default install is CLI-only. It does not register external agent protocols and
@@ -134,11 +134,11 @@ For old installs that do not have `wechat-cli update` yet, run the release
 bootstrap again:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.sh | zsh -s -- --update
+curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | zsh -s -- --update
 ```
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); $p=Join-Path $env:TEMP 'wechat-cli-install-release.ps1'; iwr https://raw.githubusercontent.com/r266-tech/wechat-cli/main/scripts/install-release.ps1 -OutFile $p -UseBasicParsing; powershell -NoProfile -ExecutionPolicy Bypass -File $p -Update -Json"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); $p=Join-Path $env:TEMP 'wechat-cli-install-release.ps1'; iwr https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1 -OutFile $p -UseBasicParsing; powershell -NoProfile -ExecutionPolicy Bypass -File $p -Update -Json"
 ```
 
 When already inside a freshly extracted release zip, this lower-level command
@@ -227,7 +227,7 @@ does not install a launchd watcher by default for the same reason.
 - Use `timeline` as the normal chat-reading entrypoint. It resolves `chat`,
   reads live messages, defaults to `order=desc` plus `display_order=asc`, and
   returns `query` / `freshness` / `messages`. Use `query.has_more` and
-  `query.next_offset` to page through a whole chat.
+  `query.cursor.next_before_message` to page backward without offset drift.
 - Use `tail` / `watch` for read-only incremental observation. With `chat` it
   returns message events whose `event.message` has the same shape as timeline
   rows; without `chat`, `--mode sessions` returns session/unread events. Reuse
