@@ -119,6 +119,18 @@ function Assert-PeAmd64 {
   }
 }
 
+function Write-Sha256Manifest {
+  param(
+    [string]$SourcePath,
+    [string]$ManifestPath,
+    [string]$FileName
+  )
+
+  $hash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  # A literal LF keeps `shasum -c` portable when Windows assets are verified on Unix.
+  [IO.File]::WriteAllText($ManifestPath, "$hash  $FileName`n", [Text.Encoding]::ASCII)
+}
+
 if ([string]::IsNullOrWhiteSpace($WcdbLib)) {
   foreach ($cand in @(
     (Join-Path $SourceDir "lib\libWCDB.dll"),
@@ -184,17 +196,15 @@ if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
 if (Test-Path $latest) { Remove-Item -LiteralPath $latest -Force }
 Compress-Archive -Path $dist -DestinationPath $zip -Force
 Copy-Item -LiteralPath $zip -Destination $latest -Force
-Get-FileHash -LiteralPath $zip -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $zip -Leaf)" } | Set-Content -LiteralPath "$zip.sha256" -Encoding ASCII
-Get-FileHash -LiteralPath $latest -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $latest -Leaf)" } | Set-Content -LiteralPath "$latest.sha256" -Encoding ASCII
+Write-Sha256Manifest -SourcePath $zip -ManifestPath "$zip.sha256" -FileName (Split-Path $zip -Leaf)
+Write-Sha256Manifest -SourcePath $latest -ManifestPath "$latest.sha256" -FileName (Split-Path $latest -Leaf)
 
 $bootstrapAssets = [ordered]@{}
 foreach ($name in @("install-release.sh", "install-release.ps1")) {
   $source = Join-Path $SourceDir "scripts\$name"
   $destination = Join-Path $distRoot $name
   Copy-Item -LiteralPath $source -Destination $destination -Force
-  Get-FileHash -LiteralPath $destination -Algorithm SHA256 |
-    ForEach-Object { "$($_.Hash.ToLowerInvariant())  $name" } |
-    Set-Content -LiteralPath "$destination.sha256" -Encoding ASCII
+  Write-Sha256Manifest -SourcePath $destination -ManifestPath "$destination.sha256" -FileName $name
   $bootstrapAssets[$name] = $destination
   $bootstrapAssets["$name.sha256"] = "$destination.sha256"
 }
