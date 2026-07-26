@@ -309,9 +309,7 @@ func (s *server) finishContextRows(talker string, rows []wcdb.Row) {
 		return
 	}
 	setContextTalker(talker, rows)
-	s.attachDisplayNames(rows,
-		[2]string{"talker", "talker_display_name"},
-		[2]string{"sender_wxid", "sender_display_name"})
+	s.attachMessageDisplayNames(rows)
 	if selfWxid := s.selfWxid(); selfWxid != "" {
 		for _, r := range rows {
 			sw := rowString(r, "sender_wxid")

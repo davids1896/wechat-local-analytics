@@ -250,7 +250,8 @@ does not install a launchd watcher by default for the same reason.
 Agent-ready message rows include:
 
 `id(local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`,
-`sender_wxid`, `is_from_me`, `kind`, `text`, display-ready `images` / `videos` /
+`sender_wxid`, optional `sender_group_nickname` / `sender_contact_display`,
+`is_from_me`, `kind`, `text`, display-ready `images` / `videos` /
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
 `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and
 concise `warnings`.

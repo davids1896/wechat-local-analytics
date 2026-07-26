@@ -1200,9 +1200,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	} else {
 		rows, page.HasMore = sliceRowsWithHasMore(rows, offset, limit)
 	}
-	s.attachDisplayNames(rows,
-		[2]string{"talker", "talker_display_name"},
-		[2]string{"sender_wxid", "sender_display_name"})
+	s.attachMessageDisplayNames(rows)
 	if selfWxid := s.selfWxid(); selfWxid != "" {
 		for _, r := range rows {
 			sw, _ := r["sender_wxid"].(string)
@@ -1285,7 +1283,8 @@ func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.
 		"talker": true, "talker_display_name": true, "chat_type": true,
 		"local_id": true, "server_id": true, "server_id_str": true,
 		"create_time": true, "create_time_human": true,
-		"sender_wxid": true, "sender_display_name": true, "is_from_me": true,
+		"sender_wxid": true, "sender_display_name": true,
+		"sender_group_nickname": true, "sender_contact_display": true, "is_from_me": true,
 		"base_kind": true, "kind_name": true, "content_summary": true,
 		"id": true, "display": true, "images": true, "videos": true, "files": true,
 		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "quote": true,
@@ -1387,6 +1386,7 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 		"kind":        rowString(r, "kind_name"),
 		"text":        agentMessageText(r),
 	}
+	addOptionalGroupIdentity(out, r)
 	if warnings := agentMessageWarnings(r); len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
@@ -3546,7 +3546,7 @@ func (s *server) toolMediaResources(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.attachDisplayNames(rows, [2]string{"talker", "talker_display_name"}, [2]string{"sender_wxid", "sender_display_name"})
+	s.attachMessageDisplayNames(rows)
 	return s.buildMediaResourceOutput(rows, getBoolDefault(a, "include_local_paths", true), includeDebugOutput(a)), nil
 }
 
@@ -3578,6 +3578,7 @@ func (s *server) buildMediaResourceOutput(rows []wcdb.Row, includeLocalPaths boo
 				"message_origin_source": rowInt64(r, "message_origin_source"),
 				"resources":             []map[string]any{},
 			}
+			addOptionalGroupIdentity(item, r)
 			item["id"] = compactMap(map[string]any{
 				"local_id":      item["local_id"],
 				"server_id_str": item["server_id_str"],
@@ -6618,10 +6619,6 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 		if needsPostFilter && len(enrichmentWarnings) > 0 {
 			return nil, fmt.Errorf("search post-filter completeness could not be guaranteed: %s", strings.Join(enrichmentWarnings, ", "))
 		}
-		s.attachDisplayNames(batch,
-			[2]string{"talker", "talker_display_name"},
-			[2]string{"sender_wxid", "sender_display_name"})
-		decorateMessageSearchRows(batch)
 		batch = filterLiveSearchRows(batch, a, sender)
 		rows = append(rows, batch...)
 		scanned += rawCount
@@ -6641,6 +6638,11 @@ func (s *server) toolSearch(a map[string]any) (any, error) {
 			rows = nil
 		}
 	}
+	if limit > 0 && len(rows) > limit+1 {
+		rows = rows[:limit+1]
+	}
+	s.attachMessageDisplayNames(rows)
+	decorateMessageSearchRows(rows)
 	return searchRowsResult(rows, complete && len(warnings) == 0, warnings), nil
 }
 
@@ -8199,7 +8201,7 @@ func (s *server) liveMessageMeta(rows []wcdb.Row, sidCol, talkerCol string) map[
 		}
 		closeMsgDBs(shards)
 	}
-	s.attachDisplayNames(allMeta, [2]string{"sender_wxid", "sender_display_name"})
+	s.attachMessageDisplayNames(allMeta)
 	for _, mr := range allMeta {
 		out[messagePairKey(rowString(mr, "talker"), rowInt64(mr, "server_id"))] = mr
 	}

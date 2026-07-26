@@ -150,13 +150,19 @@ jq -n --arg chat "聊天名" '{chat:$chat,limit:20}' | wechat-cli call-json time
 {
   "id": {"local_id": 123, "server_id_str": "9876543210", "talker": "xxx@chatroom"},
   "time_iso": "2026-05-26T13:00:00+08:00",
-  "sender": "Alice",
+  "sender": "Room Nickname",
+  "sender_wxid": "wxid_alice",
+  "sender_group_nickname": "Room Nickname",
+  "sender_contact_display": "Alice",
   "is_from_me": false,
   "kind": "image",
   "text": "[图片]",
   "images": [{"path": "/Users/me/.wechat-cli/media-cache/xxx.jpg"}]
 }
 ```
+
+群消息优先使用可可靠解析的群内昵称作为 `sender`。`sender_wxid` 保留稳定身份，
+`sender_contact_display` 与 `sender_group_nickname` 仅在对应信息可可靠解析时返回。
 
 默认只返回人能在微信里看到、且 agent 可直接使用的信息。raw XML、CDN key、协议码、不可读 `.dat` 与候选路径只在 debug/full 输出中出现。
 
