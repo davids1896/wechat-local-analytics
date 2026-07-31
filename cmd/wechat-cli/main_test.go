@@ -550,7 +550,11 @@ func TestReadRegressionScriptRequiresExplicitInputs(t *testing.T) {
 	if _, err := os.Stat(script); err != nil {
 		t.Skipf("regression script unavailable: %v", err)
 	}
-	cmd := exec.Command("bash", script)
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	cmd := exec.Command(bash, script)
 	cmd.Env = append(os.Environ(),
 		"WECHAT_CLI_BIN=true",
 		"WECHAT_READ_TEST_CHAT=",
@@ -1487,6 +1491,11 @@ func TestVoiceTranscriptStrictReadOnlyDoesNotWriteCache(t *testing.T) {
 
 func TestVoiceTranscriptPrefersFasterWhisperLargeV3AndRefreshesOldCache(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("WECHAT_CLI_STATE_DIR", t.TempDir())
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_PYTHON", "")
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_MODEL", "")
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_LANGUAGE", "")
+	t.Setenv("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "")
 	wav := filepath.Join(dir, "voice.wav")
 	if err := os.WriteFile(wav, []byte("RIFF0000WAVEfmt "), 0o600); err != nil {
 		t.Fatal(err)
@@ -1554,6 +1563,43 @@ func TestASRSetupDryRunUsesStateVenv(t *testing.T) {
 	}
 	if _, err := os.Stat(wantVenv); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dry-run created venv or unexpected stat error: %v", err)
+	}
+}
+
+func TestRunFasterWhisperVoiceASRForcesUTF8(t *testing.T) {
+	dir := t.TempDir()
+	envLog := filepath.Join(dir, "python.env.log")
+	python := buildTestBinary(t, dir, "python-utf8", `package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	_ = os.WriteFile(os.Getenv("TEST_ENV_LOG"), []byte(os.Getenv("PYTHONUTF8")+"/"+os.Getenv("PYTHONIOENCODING")), 0o600)
+	fmt.Println("transcript")
+}
+`)
+	t.Setenv("TEST_ENV_LOG", envLog)
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_MODEL", "small")
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_LANGUAGE", "zh")
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_DEVICE", "cpu")
+	t.Setenv("WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE", "int8")
+
+	text, engine, model, err := runFasterWhisperVoiceASRWithPython(python, filepath.Join(dir, "voice.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(text) != "transcript" || engine != "faster-whisper" || model != "small" {
+		t.Fatalf("result = %q/%q/%q", text, engine, model)
+	}
+	env, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(env) != "1/utf-8" {
+		t.Fatalf("python encoding env = %q, want %q", env, "1/utf-8")
 	}
 }
 
@@ -2932,6 +2978,8 @@ func TestDecodeLocalImageStrictReadOnlySkipsImageKeyRefresh(t *testing.T) {
 func TestDecodeLocalImageForAgentAutoRefreshesImageKey(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("WECHAT_CLI_DB_ROOT", "")
+	t.Setenv("WX_MCP_DB_ROOT", "")
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("WX_MCP_CONFIG", cfgPath)
 	root := t.TempDir()

@@ -4817,7 +4817,7 @@ func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
 	}))
 }
 
-const voiceTranscriptCacheVersion = 3
+const voiceTranscriptCacheVersion = 4
 
 func voiceTranscriptCacheUsable(cached map[string]any) bool {
 	if len(cached) == 0 {
@@ -4981,6 +4981,8 @@ func runFasterWhisperVoiceASRWithPython(python, audioPath string) (text, engine,
 	cmd.Env = append(os.Environ(),
 		"WECHAT_CLI_FASTER_WHISPER_DEVICE="+device,
 		"WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE="+computeType,
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -46,6 +46,7 @@ func TestLoadAppliesDBRootOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("WX_MCP_CONFIG", cfgPath)
+	t.Setenv("WECHAT_CLI_DB_ROOT", "")
 	t.Setenv("WX_MCP_DB_ROOT", root)
 	cfg, err := Load()
 	if err != nil {
@@ -285,6 +286,7 @@ func TestAutoDetectDBRootUsesEnvOverride(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "db_storage"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("WECHAT_CLI_DB_ROOT", "")
 	t.Setenv("WX_MCP_DB_ROOT", root)
 	gotRoot, wxid, err := AutoDetectDBRoot()
 	if err != nil {

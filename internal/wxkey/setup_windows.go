@@ -3,6 +3,7 @@
 package wxkey
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -82,12 +83,26 @@ type windowsProcess struct {
 }
 
 type windowsSetupStats struct {
-	SourceDBs        int      `json:"source_dbs"`
-	TargetSalts      int      `json:"target_salts"`
-	ScannedProcesses int      `json:"scanned_processes"`
-	ScannedPIDs      []uint32 `json:"scanned_pids"`
-	MatchedSalts     int      `json:"matched_salts"`
-	VerifiedDBs      int      `json:"verified_dbs"`
+	SourceDBs            int      `json:"source_dbs"`
+	TargetSalts          int      `json:"target_salts"`
+	ScannedProcesses     int      `json:"scanned_processes"`
+	ScannedPIDs          []uint32 `json:"scanned_pids,omitempty"`
+	OpenProcessFailures  int      `json:"open_process_failures"`
+	QueriedRegions       int      `json:"queried_regions"`
+	ReadableRegions      int      `json:"readable_regions"`
+	ReadAttempts         int      `json:"read_attempts"`
+	ReadSuccesses        int      `json:"read_successes"`
+	ReadBytes            uint64   `json:"read_bytes"`
+	RawKeyLiterals       int      `json:"raw_key_literals"`
+	TargetSaltLiterals   int      `json:"target_salt_literals"`
+	UTF16RawKeyLiterals  int      `json:"utf16_raw_key_literals"`
+	UTF16TargetLiterals  int      `json:"utf16_target_salt_literals"`
+	BinarySaltHits       int      `json:"binary_salt_hits"`
+	BinaryCandidates     int      `json:"binary_candidates"`
+	MatchedSalts         int      `json:"matched_salts"`
+	VerificationAttempts int      `json:"verification_attempts"`
+	VerificationFailures int      `json:"verification_failures"`
+	VerifiedDBs          int      `json:"verified_dbs"`
 }
 
 func runSetup() (*SetupResult, string, error) {
@@ -137,6 +152,7 @@ func runSetup() (*SetupResult, string, error) {
 	}
 
 	found := map[string]string{}
+	binaryCandidates := map[string][]string{}
 	stats := windowsSetupStats{SourceDBs: len(dbs), TargetSalts: len(salts)}
 	var firstHitPID uint32
 	scanTimeout := windowsKeyScanTimeout()
@@ -155,9 +171,9 @@ func runSetup() (*SetupResult, string, error) {
 		}
 		stats.ScannedProcesses++
 		stats.ScannedPIDs = append(stats.ScannedPIDs, p.pid)
-		before := len(found)
-		if err := windowsScanProcess(p.pid, salts, found, scanDeadline); err != nil {
-			if firstHitPID == 0 && len(found) > before {
+		before := windowsCandidateCount(found, binaryCandidates)
+		if err := windowsScanProcess(p.pid, salts, found, binaryCandidates, scanDeadline, &stats); err != nil {
+			if firstHitPID == 0 && windowsCandidateCount(found, binaryCandidates) > before {
 				firstHitPID = p.pid
 			}
 			if errors.Is(err, errWindowsKeyScanDeadline) {
@@ -166,7 +182,7 @@ func runSetup() (*SetupResult, string, error) {
 			}
 			continue
 		}
-		if firstHitPID == 0 && len(found) > before {
+		if firstHitPID == 0 && windowsCandidateCount(found, binaryCandidates) > before {
 			firstHitPID = p.pid
 		}
 	}
@@ -174,11 +190,20 @@ func runSetup() (*SetupResult, string, error) {
 	var results []ResultEntry
 	verified := map[string]string{}
 	for _, db := range dbs {
-		key, ok := found[db.salt]
-		if !ok {
+		candidates := windowsCandidateKeys(found[db.salt], binaryCandidates[db.salt])
+		if len(candidates) == 0 {
 			continue
 		}
-		if !windowsVerifyDBKey(db.path, key, db.salt) {
+		var key string
+		for _, candidate := range candidates {
+			stats.VerificationAttempts++
+			if windowsVerifyDBKey(db.path, candidate, db.salt) {
+				key = candidate
+				break
+			}
+			stats.VerificationFailures++
+		}
+		if key == "" {
 			continue
 		}
 		verified[db.salt] = key
@@ -190,11 +215,13 @@ func runSetup() (*SetupResult, string, error) {
 			VerifyAs: "windows-process-raw-key",
 		})
 	}
+	stats.MatchedSalts = windowsMatchedSaltCount(found, binaryCandidates)
 	if len(verified) == 0 {
+		diagnostics := windowsFailureDiagnostics(stats)
 		if timedOut {
-			return nil, "", fmt.Errorf("Windows key scan timed out after %s before finding usable keys; keep WeChat logged in, open one chat, then retry", scanTimeout.Round(time.Second))
+			return nil, "", fmt.Errorf("Windows key scan timed out after %s before finding usable keys; diagnostics=%s", scanTimeout.Round(time.Second), diagnostics)
 		}
-		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); ensure WECHAT_CLI_DB_ROOT matches the logged-in account", stats.ScannedProcesses)
+		return nil, "", fmt.Errorf("no usable Windows WeChat raw keys found after scanning %d process(es); diagnostics=%s", stats.ScannedProcesses, diagnostics)
 	}
 
 	keyEpoch := time.Now().Unix()
@@ -232,7 +259,6 @@ func runSetup() (*SetupResult, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("reload Windows key config: %w", err)
 	}
-	stats.MatchedSalts = len(found)
 	stats.VerifiedDBs = len(results)
 	statsJSON, _ := json.Marshal(stats)
 	cfgPath, _ := config.Path()
@@ -250,6 +276,53 @@ func runSetup() (*SetupResult, string, error) {
 		msg = fmt.Sprintf("Windows key scan OK with partial coverage before timeout %s: verified %d/%d db files from %d process(es)\n", scanTimeout.Round(time.Second), stats.VerifiedDBs, stats.SourceDBs, stats.ScannedProcesses)
 	}
 	return res, msg, nil
+}
+
+func windowsFailureDiagnostics(stats windowsSetupStats) string {
+	stats.ScannedPIDs = nil
+	b, err := json.Marshal(stats)
+	if err != nil {
+		return `{"error":"encode diagnostics"}`
+	}
+	return string(b)
+}
+
+func windowsCandidateCount(literals map[string]string, binary map[string][]string) int {
+	n := len(literals)
+	for _, candidates := range binary {
+		n += len(candidates)
+	}
+	return n
+}
+
+func windowsMatchedSaltCount(literals map[string]string, binary map[string][]string) int {
+	matched := make(map[string]bool, len(literals)+len(binary))
+	for salt := range literals {
+		matched[salt] = true
+	}
+	for salt, candidates := range binary {
+		if len(candidates) > 0 {
+			matched[salt] = true
+		}
+	}
+	return len(matched)
+}
+
+func windowsCandidateKeys(literal string, binary []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	if literal != "" {
+		seen[literal] = true
+		out = append(out, literal)
+	}
+	for _, candidate := range binary {
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func windowsKeyScanTimeout() time.Duration {
@@ -451,9 +524,10 @@ func windowsCurrentPID() uint32 {
 	return uint32(r)
 }
 
-func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[string]string, deadline time.Time) error {
+func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[string]string, binaryCandidates map[string][]string, deadline time.Time, stats *windowsSetupStats) error {
 	h, _, err := procOpenProcess.Call(processVMRead|processQueryInformation, 0, uintptr(pid))
 	if h == 0 {
+		stats.OpenProcessFailures++
 		return err
 	}
 	defer procCloseHandle.Call(h)
@@ -471,12 +545,14 @@ func windowsScanProcess(pid uint32, targetSalts map[string]bool, found map[strin
 			addr += 0x10000
 			continue
 		}
+		stats.QueriedRegions++
 		next := m.BaseAddress + m.RegionSize
 		if next <= addr {
 			return nil
 		}
 		if windowsReadableRegion(m) {
-			if err := windowsScanRegion(h, m.BaseAddress, m.RegionSize, targetSalts, found, deadline); err != nil {
+			stats.ReadableRegions++
+			if err := windowsScanRegion(h, m.BaseAddress, m.RegionSize, targetSalts, found, binaryCandidates, deadline, stats); err != nil {
 				return err
 			}
 		}
@@ -489,7 +565,7 @@ func windowsReadableRegion(m windowsMemoryBasicInformation) bool {
 	return m.State == memCommit && m.RegionSize > 0 && m.Protect&pageNoAccess == 0 && m.Protect&pageGuard == 0
 }
 
-func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[string]bool, found map[string]string, deadline time.Time) error {
+func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[string]bool, found map[string]string, binaryCandidates map[string][]string, deadline time.Time, stats *windowsSetupStats) error {
 	const chunkSize = 4 << 20
 	var overlap []byte
 	for off := uintptr(0); off < size; {
@@ -505,12 +581,17 @@ func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[stri
 		}
 		buf := make([]byte, n)
 		var got uintptr
+		stats.ReadAttempts++
 		r, _, _ := procReadProcessMemory.Call(process, base+off, uintptr(unsafe.Pointer(&buf[0])), uintptr(n), uintptr(unsafe.Pointer(&got)))
 		if r != 0 && got > 0 {
+			stats.ReadSuccesses++
+			stats.ReadBytes += uint64(got)
 			data := append(append([]byte{}, overlap...), buf[:got]...)
-			scanRawKeyLiterals(data, targetSalts, found)
-			if len(data) > 128 {
-				overlap = append(overlap[:0], data[len(data)-128:]...)
+			scanRawKeyLiterals(data, targetSalts, found, stats)
+			scanUTF16RawKeyLiterals(data, targetSalts, found, stats)
+			scanBinaryRawKeyCandidates(data, targetSalts, binaryCandidates, stats)
+			if len(data) > 256 {
+				overlap = append(overlap[:0], data[len(data)-256:]...)
 			} else {
 				overlap = append(overlap[:0], data...)
 			}
@@ -520,7 +601,7 @@ func windowsScanRegion(process uintptr, base, size uintptr, targetSalts map[stri
 	return nil
 }
 
-func scanRawKeyLiterals(data []byte, targetSalts map[string]bool, found map[string]string) int {
+func scanRawKeyLiterals(data []byte, targetSalts map[string]bool, found map[string]string, stats *windowsSetupStats) int {
 	var hits int
 	for i := 0; i+99 <= len(data); i++ {
 		if data[i] != 'x' || data[i+1] != '\'' || data[i+98] != '\'' {
@@ -530,10 +611,12 @@ func scanRawKeyLiterals(data []byte, targetSalts map[string]bool, found map[stri
 		if !asciiHex(hexBytes) {
 			continue
 		}
+		stats.RawKeyLiterals++
 		salt := strings.ToLower(string(hexBytes[64:96]))
 		if !targetSalts[salt] {
 			continue
 		}
+		stats.TargetSaltLiterals++
 		key := strings.ToLower(string(hexBytes[:64]))
 		if _, err := hex.DecodeString(key); err != nil {
 			continue
@@ -544,13 +627,98 @@ func scanRawKeyLiterals(data []byte, targetSalts map[string]bool, found map[stri
 	return hits
 }
 
-func asciiHex(b []byte) bool {
+func scanUTF16RawKeyLiterals(data []byte, targetSalts map[string]bool, found map[string]string, stats *windowsSetupStats) int {
+	var hits int
+	for i := 0; i+198 <= len(data); i++ {
+		if data[i] != 'x' || data[i+1] != 0 || data[i+2] != '\'' || data[i+3] != 0 || data[i+196] != '\'' || data[i+197] != 0 {
+			continue
+		}
+		hexBytes := make([]byte, 96)
+		valid := true
+		for j := range hexBytes {
+			c := data[i+4+j*2]
+			if data[i+5+j*2] != 0 || !asciiHexByte(c) {
+				valid = false
+				break
+			}
+			hexBytes[j] = c
+		}
+		if !valid {
+			continue
+		}
+		stats.UTF16RawKeyLiterals++
+		salt := strings.ToLower(string(hexBytes[64:96]))
+		if !targetSalts[salt] {
+			continue
+		}
+		stats.UTF16TargetLiterals++
+		key := strings.ToLower(string(hexBytes[:64]))
+		found[salt] = key
+		hits++
+	}
+	return hits
+}
+
+const maxBinaryCandidatesPerSalt = 64
+
+func scanBinaryRawKeyCandidates(data []byte, targetSalts map[string]bool, candidates map[string][]string, stats *windowsSetupStats) {
+	for saltHex := range targetSalts {
+		salt, err := hex.DecodeString(saltHex)
+		if err != nil || len(salt) != 16 {
+			continue
+		}
+		for searchFrom := 0; searchFrom < len(data); {
+			rel := bytes.Index(data[searchFrom:], salt)
+			if rel < 0 {
+				break
+			}
+			idx := searchFrom + rel
+			stats.BinarySaltHits++
+			if idx >= 32 {
+				addBinaryCandidate(saltHex, data[idx-32:idx], candidates, stats)
+			}
+			if idx+len(salt)+32 <= len(data) {
+				addBinaryCandidate(saltHex, data[idx+len(salt):idx+len(salt)+32], candidates, stats)
+			}
+			searchFrom = idx + 1
+		}
+	}
+}
+
+func addBinaryCandidate(salt string, raw []byte, candidates map[string][]string, stats *windowsSetupStats) {
+	if len(raw) != 32 || allZero(raw) || len(candidates[salt]) >= maxBinaryCandidatesPerSalt {
+		return
+	}
+	key := hex.EncodeToString(raw)
+	for _, existing := range candidates[salt] {
+		if existing == key {
+			return
+		}
+	}
+	candidates[salt] = append(candidates[salt], key)
+	stats.BinaryCandidates++
+}
+
+func allZero(b []byte) bool {
 	for _, c := range b {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if c != 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func asciiHex(b []byte) bool {
+	for _, c := range b {
+		if !asciiHexByte(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 func wxidFromAccountDir(path string) string {
