@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wetrace 微信分析"
+  short_description: "使用 wechat-cli 只读分析本地微信聊天记录"
+  default_prompt: "Use $wetrace to analyze my local WeChat chats and report the exact data scope."
