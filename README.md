@@ -10,7 +10,7 @@
 项目不会发送或删除微信消息，不会控制微信界面，也不需要非官方协议登录。数据读取与统计在本机完成；若把结果交给 Codex 或其他 Agent 做语义分析，数据处理边界取决于所使用的 Agent 平台与配置。
 
 > [!IMPORTANT]
-> CLI 的数据库访问可以保持只读，但登录、打开聊天或播放媒体的官方桌面微信可能同步手机端已读状态。若未读红点很重要，优先使用离线数据副本，并避免为了取密钥而打开相应会话。
+> CLI 的数据库访问可以保持只读，但登录、打开聊天或播放媒体的官方桌面微信可能同步手机端已读状态。Wetrace 因此强制使用离线数据副本，并拒绝直接读取微信正在使用的数据目录。
 
 ## 功能
 
@@ -91,28 +91,42 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Yes -Json
 
 若尚未安装，请先阅读 [Windows 快速开始](docs/WINDOWS_QUICKSTART.md)，其中包含获取 WCDB DLL、设置数据目录和首次密钥读取的完整步骤。
 
-### 4. 设置微信数据目录
+### 4. 创建并设置离线数据副本
 
-`WECHAT_CLI_DB_ROOT` 必须指向**直接包含 `db_storage` 的账号目录**：
-
-```powershell
-$env:WECHAT_CLI_DB_ROOT = 'D:\WeChatData\xwechat_files\<账号目录>'
-Get-ChildItem "$env:WECHAT_CLI_DB_ROOT\db_storage"
-```
-
-长期使用可以写入当前用户环境变量：
+Wetrace 不直接读取微信正在使用的数据目录。先从托盘彻底退出微信，再创建离线副本：
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-  'WECHAT_CLI_DB_ROOT',
-  'D:\WeChatData\xwechat_files\<账号目录>',
-  'User'
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
+  -SourceAccountRoot 'G:\微信文件\xwechat_files\<账号目录>' `
+  -DestinationRoot 'G:\微信离线副本' `
+  -SetUserEnvironment
 ```
 
-### 5. 首次读取密钥
+重新打开 PowerShell 后确认：
 
-首次密钥获取需要官方桌面微信保持登录。执行前请先了解可能的已读同步影响。
+```powershell
+$env:WETRACE_OFFLINE_DB_ROOT
+Get-ChildItem "$env:WETRACE_OFFLINE_DB_ROOT\db_storage"
+```
+
+Wetrace 只认 `WETRACE_OFFLINE_DB_ROOT`，并要求目录中存在复制完成标记
+`.wetrace-offline-copy.json`。它会覆盖并忽略可能仍指向在线目录的
+`WECHAT_CLI_DB_ROOT`。
+
+### 5. 初始化离线副本
+
+首次建立副本后，可在微信保持退出的情况下初始化该副本的元数据缓存：
+
+```powershell
+$env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
+$env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
+wechat-cli cache refresh --force --pretty
+```
+
+上述操作只读取离线副本并写入副本自己的辅助状态目录。如果已有密钥不足，它会失败；
+不要为了补密钥启动微信或打开聊天，以免再次影响未读状态。
+
+原始 `wechat-cli` 若需首次从官方客户端提取密钥，可能要求微信保持登录。
 
 ```powershell
 wechat-cli cache refresh --force
@@ -188,9 +202,12 @@ Wetrace 每次调用 `wechat-cli` 时都会设置：
 
 ```text
 WECHAT_CLI_STRICT_READ_ONLY=1
+WECHAT_CLI_DB_ROOT=<WETRACE_OFFLINE_DB_ROOT>
+WECHAT_CLI_STATE_DIR=<离线副本>\.wechat-cli-state
 ```
 
-这会禁止 `wechat-cli` 自动刷新元数据/密钥、写媒体解码缓存、写语音转写缓存以及执行 CLI 自带的导出操作。
+它拒绝没有完成标记的目录，并禁止 `wechat-cli` 自动刷新元数据/密钥、写媒体解码缓存、
+写语音转写缓存以及执行 CLI 自带的导出操作。
 
 Wetrace 自己仍可在用户明确要求时，把分析结果写入 `~/wetrace-exports/` 或指定路径。它不会修改微信数据库。
 

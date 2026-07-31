@@ -2,6 +2,10 @@
 
 入口：`scripts/wetrace_api.py`
 
+所有命令都要求 `WETRACE_OFFLINE_DB_ROOT` 指向带
+`.wetrace-offline-copy.json` 完成标记的离线账号目录。Wetrace 不读取外部
+`WECHAT_CLI_DB_ROOT` 指定的在线目录。
+
 ## 查询
 
 - `doctor`

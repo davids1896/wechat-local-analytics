@@ -2,7 +2,32 @@
 
 Wetrace 是本仓库的 Python 分析层。它直接调用本机 `wechat-cli call-json`，不需要启动 HTTP 服务。
 
-## 1. 启动方式
+## 1. 准备离线副本
+
+Wetrace 不接受微信正在使用的在线目录。先从托盘彻底退出微信，然后运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
+  -SourceAccountRoot 'G:\微信文件\xwechat_files\<账号目录>' `
+  -DestinationRoot 'G:\微信离线副本' `
+  -SetUserEnvironment
+```
+
+脚本会在确认 `Weixin`/`WeChat` 进程均已退出后复制 `db_storage`，创建带时间戳的新目录，
+并在复制成功后写入 `.wetrace-offline-copy.json`。复制过程中若微信重新启动，目录不会被
+标记为安全副本。
+
+重新打开 PowerShell 后，初始化离线副本自己的元数据缓存：
+
+```powershell
+$env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
+$env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
+wechat-cli cache refresh --force --pretty
+```
+
+初始化时无需启动微信。若已有数据库密钥不足，命令会失败；不要为了分析而打开微信或聊天。
+
+## 2. 启动方式
 
 从仓库根目录运行：
 
@@ -26,7 +51,10 @@ $env:WECHAT_CLI_BIN = 'D:\Tools\wechat-cli\wechat-cli.exe'
 
 Wetrace 能安全解析由安装器创建的简单 `wechat-cli.cmd` 转发文件，但不会通过 Shell 执行任意批处理内容。
 
-## 2. 时间范围
+Wetrace 会忽略外部 `WECHAT_CLI_DB_ROOT`，只使用经过标记验证的
+`WETRACE_OFFLINE_DB_ROOT`。
+
+## 3. 时间范围
 
 支持：
 
@@ -45,7 +73,7 @@ last_30_days
 
 明确日期范围的结束日期会扩展到当天 `23:59:59`。
 
-## 3. 查找会话
+## 4. 查找会话
 
 查看最近会话：
 
@@ -73,7 +101,7 @@ last_30_days
 
 若存在同名会话，优先使用返回结果里的原始 `username` 作为 `--talker`。
 
-## 4. 读取聊天记录
+## 5. 读取聊天记录
 
 读取最近 50 条：
 
@@ -106,7 +134,7 @@ last_30_days
 .\scripts\wetrace.ps1 messages --talker "项目群" --kind voice --time-range "last_30_days" --limit 1000
 ```
 
-## 5. 关键词搜索与上下文
+## 6. 关键词搜索与上下文
 
 搜索单个会话：
 
@@ -126,7 +154,7 @@ last_30_days
 .\scripts\wetrace.ps1 search-context --talker "项目群" --local-id 123456 --before 10 --after 10
 ```
 
-## 6. 单会话统计
+## 7. 单会话统计
 
 汇总：
 
@@ -169,7 +197,7 @@ last_30_days
 
 词频使用轻量正则切词，不等同于专业中文分词结果。
 
-## 7. 跨会话统计
+## 8. 跨会话统计
 
 最近 30 天聊得最多的联系人和群：
 
@@ -204,7 +232,7 @@ scope.truncated
 
 只要会话列表、任一会话消息或失败会话导致范围不完整，`scope.truncated` 就会是 `true`。
 
-## 8. 仪表板与导出
+## 9. 仪表板与导出
 
 生成 HTML 仪表板：
 
@@ -243,7 +271,7 @@ scope.truncated
 
 PDF、DOCX 和 XLSX 不由该脚本伪造。应先导出 JSON，再交给相应文档工具生成。
 
-## 9. Codex Skill 用法
+## 10. Codex Skill 用法
 
 安装：
 
@@ -273,8 +301,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-sk
 
 待办、摘要、关系分析等语义判断由 Agent 基于消息 JSON 完成。脚本本身不会把关键词规则包装成确定事实。
 
-## 10. 数据和隐私边界
+## 11. 数据和隐私边界
 
+- Wetrace 只读取带完成标记的离线副本。
+- Wetrace 强制用 `WETRACE_OFFLINE_DB_ROOT` 覆盖 `WECHAT_CLI_DB_ROOT`。
 - Wetrace 总是用 `WECHAT_CLI_STRICT_READ_ONLY=1` 调用数据层。
 - 不发送、删除或标记消息。
 - 不控制微信 UI。
@@ -284,7 +314,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-sk
 - 未落盘语音不推测内容。
 - 报告中应区分事实统计、Agent 总结和推断。
 
-## 11. 故障排查
+## 12. 故障排查
+
+### 缺少离线副本
+
+运行第 1 节的副本创建命令。不要手工伪造 `.wetrace-offline-copy.json`。
 
 ### 找不到 wechat-cli
 
@@ -295,13 +329,15 @@ $env:WECHAT_CLI_BIN = "$env:LOCALAPPDATA\wechat-cli\wechat-cli.exe"
 
 ### doctor 报密钥未就绪
 
-严格只读模式不会自动取密钥。退出 Wetrace 流程，显式执行：
+严格只读模式不会自动取密钥。只针对离线副本显式执行：
 
 ```powershell
+$env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
+$env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
 wechat-cli cache refresh --force --pretty
 ```
 
-完成后再运行 Wetrace。
+完成后再运行 Wetrace。微信应继续保持退出。
 
 ### 名称匹配错误
 

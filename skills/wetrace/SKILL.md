@@ -9,11 +9,12 @@ description: "基于本机 wechat-cli 查询、搜索、统计、分析和导出
 
 ## 安全边界
 
+- 只允许读取带 `.wetrace-offline-copy.json` 标记的离线数据库副本。
+- 必须通过 `WETRACE_OFFLINE_DB_ROOT` 指定副本；忽略可能指向在线目录的 `WECHAT_CLI_DB_ROOT`。
 - 数据库访问始终设置 `WECHAT_CLI_STRICT_READ_ONLY=1`。
 - 不发送、删除、修改或标记消息。
 - 不控制微信界面。
-- 不要求用户为了普通分析打开聊天、播放语音或查看图片。
-- 若首次取密钥确实需要官方客户端交互，先警告可能同步手机未读状态。
+- 不要求用户为了分析启动微信、打开聊天、播放语音或查看图片。
 - 图片默认只计入类型统计，除非用户明确要求读取图片内容。
 - 未落盘语音只统计数量和时长，不推测内容。
 - 报告写入 `~/wetrace-exports/` 或用户指定路径。
@@ -31,15 +32,16 @@ skill 安装后，`scripts/wetrace_api.py` 相对于本 `SKILL.md` 所在目录�
 
 ## 工作流
 
-1. 先运行 `doctor` 检查 `wechat-cli` 和密钥状态。
-2. 用 `sessions --keyword` 或 `contacts --keyword` 解析联系人/群名称。
-3. 普通读取用 `messages`，关键词检索用 `search`。
-4. 单会话统计用 `analysis`；设置明确时间范围和 `--max-messages`。
-5. 跨会话统计用 `analysis top_contacts` 或 `analysis annual`；明确设置会话和单会话消息上限。
-6. 检查 `scope.truncated`、失败会话和扫描上限，并在回答中披露。
-7. 摘要、待办和关系洞察由 Agent 基于消息 JSON 分析，不让脚本假装完成语义判断。
-8. 可视化用 `dashboard --html`。
-9. PDF/XLSX/DOCX 先导出 JSON，再调用对应文档工具。
+1. 确认 `WETRACE_OFFLINE_DB_ROOT` 指向已完成的离线副本。
+2. 先运行 `doctor` 检查离线副本、`wechat-cli` 和密钥状态。
+3. 用 `sessions --keyword` 或 `contacts --keyword` 解析联系人/群名称。
+4. 普通读取用 `messages`，关键词检索用 `search`。
+5. 单会话统计用 `analysis`；设置明确时间范围和 `--max-messages`。
+6. 跨会话统计用 `analysis top_contacts` 或 `analysis annual`；明确设置会话和单会话消息上限。
+7. 检查 `scope.truncated`、失败会话和扫描上限，并在回答中披露。
+8. 摘要、待办和关系洞察由 Agent 基于消息 JSON 分析，不让脚本假装完成语义判断。
+9. 可视化用 `dashboard --html`。
+10. PDF/XLSX/DOCX 先导出 JSON，再调用对应文档工具。
 
 ## 常用命令
 

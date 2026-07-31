@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("wetrace_api.py")
@@ -91,6 +93,81 @@ class ExecutableResolutionTests(unittest.TestCase):
             shim.write_text("echo unsafe\n", encoding="utf-8")
             with self.assertRaises(wetrace.WetraceError):
                 wetrace.WechatCLI._resolve_executable(str(shim))
+
+
+class OfflineSnapshotTests(unittest.TestCase):
+    def test_requires_dedicated_offline_root(self):
+        with self.assertRaisesRegex(wetrace.WetraceError, "只允许读取离线副本"):
+            wetrace.validate_offline_db_root("")
+
+    def test_accepts_completed_snapshot_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "live" / "account"
+            root = base / "offline" / "account"
+            (root / "db_storage").mkdir(parents=True)
+            marker = {
+                "format_version": 1,
+                "status": "complete",
+                "created_at": "2026-07-31T00:00:00Z",
+                "source_account_root": str(source),
+                "account": "account",
+            }
+            (root / wetrace.OFFLINE_MARKER).write_text(json.dumps(marker), encoding="utf-8-sig")
+            resolved, loaded = wetrace.validate_offline_db_root(str(root))
+            self.assertEqual(resolved, root.resolve())
+            self.assertEqual(loaded["status"], "complete")
+
+    def test_wechat_cli_ignores_live_db_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "offline-snapshot"
+            (root / "db_storage").mkdir(parents=True)
+            marker = {
+                "format_version": 1,
+                "status": "complete",
+                "source_account_root": str(base / "live-account"),
+                "account": "account",
+            }
+            (root / wetrace.OFFLINE_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+            executable = base / "wechat-cli.exe"
+            executable.touch()
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "WETRACE_OFFLINE_DB_ROOT": str(root),
+                    "WECHAT_CLI_DB_ROOT": str(base / "live-account"),
+                },
+                clear=False,
+            ):
+                cli = wetrace.WechatCLI(str(executable))
+            self.assertEqual(cli.offline_root, root.resolve())
+            self.assertEqual(cli.state_dir, root.resolve() / ".wechat-cli-state")
+
+    def test_rejects_offline_root_equal_to_configured_live_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "account"
+            (root / "db_storage").mkdir(parents=True)
+            marker = {
+                "format_version": 1,
+                "status": "complete",
+                "source_account_root": str(Path(directory) / "other-source"),
+            }
+            (root / wetrace.OFFLINE_MARKER).write_text(json.dumps(marker), encoding="utf-8")
+            with mock.patch.dict(
+                "os.environ",
+                {"WECHAT_CLI_DB_ROOT": str(root)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(wetrace.WetraceError, "疑似在线目录"):
+                    wetrace.validate_offline_db_root(str(root))
+
+    def test_rejects_unmarked_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "account"
+            (root / "db_storage").mkdir(parents=True)
+            with self.assertRaisesRegex(wetrace.WetraceError, "缺少安全标记"):
+                wetrace.validate_offline_db_root(str(root))
 
 
 class AnalysisTests(unittest.TestCase):

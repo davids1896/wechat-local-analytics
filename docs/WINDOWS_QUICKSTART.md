@@ -179,13 +179,24 @@ wechat-cli --strict-read-only timeline "会话名称" --limit 50 --pretty
 
 ## 9. 使用 Wetrace
 
+先从托盘彻底退出微信，并创建带完成标记的离线副本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
+  -SourceAccountRoot $env:WECHAT_CLI_DB_ROOT `
+  -DestinationRoot 'G:\微信离线副本' `
+  -SetUserEnvironment
+```
+
+重新打开 PowerShell 后：
+
 ```powershell
 .\scripts\wetrace.ps1 doctor
 .\scripts\wetrace.ps1 sessions --limit 20
 .\scripts\wetrace.ps1 messages --talker "会话名称" --time-range "last_7_days" --limit 100
 ```
 
-Wetrace 会自动为所有数据库读取设置严格只读环境变量。
+Wetrace 只读取 `WETRACE_OFFLINE_DB_ROOT` 指向的离线副本，并自动设置严格只读环境变量。
 
 ## 10. 常见问题
 

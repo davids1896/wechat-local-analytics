@@ -55,6 +55,9 @@ STOP_WORDS = {
     "如果", "已经", "现在", "好的", "哈哈", "哈哈哈", "一下", "这里", "那里",
 }
 
+OFFLINE_MARKER = ".wetrace-offline-copy.json"
+OFFLINE_SOURCE = "wechat-cli/offline-db-copy"
+
 
 class WetraceError(RuntimeError):
     pass
@@ -102,12 +105,50 @@ def safe_filename(value: str) -> str:
     return cleaned[:80] or "wechat"
 
 
+def validate_offline_db_root(value: str | None = None) -> tuple[Path, dict[str, Any]]:
+    raw = value or os.environ.get("WETRACE_OFFLINE_DB_ROOT")
+    if not raw:
+        raise WetraceError(
+            "Wetrace 只允许读取离线副本；请先运行 scripts/create-wetrace-offline-copy.ps1，"
+            "再设置 WETRACE_OFFLINE_DB_ROOT"
+        )
+    root = Path(raw).expanduser().resolve()
+    if not (root / "db_storage").is_dir():
+        raise WetraceError(f"离线副本目录不包含 db_storage: {root}")
+    marker_path = root / OFFLINE_MARKER
+    if not marker_path.is_file():
+        raise WetraceError(f"离线副本缺少安全标记 {OFFLINE_MARKER}: {root}")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WetraceError(f"无法读取离线副本安全标记: {marker_path}") from exc
+    if marker.get("format_version") != 1 or marker.get("status") != "complete":
+        raise WetraceError(f"离线副本标记无效或复制未完成: {marker_path}")
+    source_raw = marker.get("source_account_root")
+    if not source_raw:
+        raise WetraceError(f"离线副本标记缺少 source_account_root: {marker_path}")
+    source = Path(source_raw).expanduser().resolve()
+    if source == root:
+        raise WetraceError("离线副本不能与微信在线数据目录相同")
+    configured_live = os.environ.get("WECHAT_CLI_DB_ROOT")
+    if configured_live and Path(configured_live).expanduser().resolve() == root:
+        raise WetraceError("WETRACE_OFFLINE_DB_ROOT 与当前 WECHAT_CLI_DB_ROOT 相同，拒绝读取疑似在线目录")
+    return root, marker
+
+
 class WechatCLI:
     def __init__(self, executable: str | None = None):
         candidate = executable or os.environ.get("WECHAT_CLI_BIN") or shutil.which("wechat-cli")
         if not candidate:
             raise WetraceError("找不到 wechat-cli；请安装后重试或设置 WECHAT_CLI_BIN")
         self.executable = self._resolve_executable(candidate)
+        self.offline_root, self.offline_marker = validate_offline_db_root()
+        state_override = os.environ.get("WETRACE_OFFLINE_STATE_DIR")
+        self.state_dir = (
+            Path(state_override).expanduser().resolve()
+            if state_override
+            else self.offline_root / ".wechat-cli-state"
+        )
 
     @staticmethod
     def _resolve_executable(candidate: str) -> str:
@@ -127,6 +168,8 @@ class WechatCLI:
         env = os.environ.copy()
         env.setdefault("PYTHONUTF8", "1")
         env["WECHAT_CLI_STRICT_READ_ONLY"] = "1"
+        env["WECHAT_CLI_DB_ROOT"] = str(self.offline_root)
+        env["WECHAT_CLI_STATE_DIR"] = str(self.state_dir)
         command = [self.executable, *argv]
         completed = subprocess.run(
             command,
@@ -194,7 +237,7 @@ class WetraceLocal:
             args["type_filter"] = type_filter
         data = self.cli.call("sessions", args)
         return {
-            "source": "wechat-cli/live-local-db",
+            "source": OFFLINE_SOURCE,
             "scope": data.get("query", {}),
             "warnings": data.get("warnings", []),
             "sessions": data.get("sessions", []),
@@ -226,7 +269,7 @@ class WetraceLocal:
             args["keyword"] = keyword
         data = self.cli.call("contacts", args)
         return {
-            "source": "wechat-cli/live-local-db",
+            "source": OFFLINE_SOURCE,
             "scope": data.get("query", {}),
             "contacts": data.get("contacts", []),
             "warnings": data.get("warnings", []),
@@ -258,7 +301,7 @@ class WetraceLocal:
                 args[key] = value
         data = self.cli.call("messages", args)
         return {
-            "source": "wechat-cli/live-local-db",
+            "source": OFFLINE_SOURCE,
             "scope": data.get("query", {}),
             "messages": [normalize_message(row) for row in data.get("messages", [])],
             "warnings": data.get("warnings", []),
@@ -313,7 +356,7 @@ class WetraceLocal:
                 args[key] = value
         data = self.cli.call("search", args)
         return {
-            "source": "wechat-cli/live-local-db",
+            "source": OFFLINE_SOURCE,
             "scope": data.get("query", {}),
             "messages": data.get("messages", []),
             "warnings": data.get("warnings", []),
@@ -328,7 +371,7 @@ class WetraceLocal:
             "include_media_paths": False,
         })
         return {
-            "source": "wechat-cli/live-local-db",
+            "source": OFFLINE_SOURCE,
             "scope": data.get("query", {}),
             "messages": [normalize_message(row) for row in data.get("messages", [])],
         }
@@ -378,7 +421,7 @@ def analyze(messages: list[dict[str, Any]], scope: dict[str, Any]) -> dict[str, 
         })
 
     return {
-        "source": "wechat-cli/live-local-db",
+        "source": OFFLINE_SOURCE,
         "scope": scope,
         "summary": {
             "total_messages": total,
@@ -476,7 +519,7 @@ def analyze_global(
             "type_distribution": global_report["type_distribution"],
             "top_contacts": [row for row in session_rows if row["total_messages"] > 0][:50],
         }
-    return {"source": "wechat-cli/live-local-db", "scope": scope, "analysis": analysis_type, "data": data}
+    return {"source": OFFLINE_SOURCE, "scope": scope, "analysis": analysis_type, "data": data}
 
 
 def repeat_analysis(messages: Iterable[dict[str, Any]], limit: int = 30) -> list[dict[str, Any]]:
@@ -665,12 +708,19 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
-    local = WetraceLocal(WechatCLI(args.wechat_cli))
 
     try:
+        local = WetraceLocal(WechatCLI(args.wechat_cli))
         if args.action == "doctor":
             status = local.cli.status()
-            emit({"ok": True, "source": "wechat-cli", "strict_read_only": True, "status": status.get("status", status)})
+            emit({
+                "ok": True,
+                "source": OFFLINE_SOURCE,
+                "strict_read_only": True,
+                "offline_db_root": str(local.cli.offline_root),
+                "snapshot_created_at": local.cli.offline_marker.get("created_at"),
+                "status": status.get("status", status),
+            })
         elif args.action == "sessions":
             emit(local.sessions(args.keyword, args.limit, args.offset, args.type_filter))
         elif args.action == "messages":
@@ -686,7 +736,7 @@ def main() -> int:
             emit(local.sessions(args.keyword, args.limit, args.offset, "group"))
         elif args.action == "chatroom":
             data = local.cli.call("group_members", {"chat": args.id, "limit": args.limit})
-            emit({"source": "wechat-cli/live-local-db", "scope": data.get("query", {}), "members": data.get("members", [])})
+            emit({"source": OFFLINE_SOURCE, "scope": data.get("query", {}), "members": data.get("members", [])})
         elif args.action == "search":
             emit(local.search(args.keyword, args.talker, args.sender, args.kind, args.time_range, args.limit, args.offset))
         elif args.action == "context":
