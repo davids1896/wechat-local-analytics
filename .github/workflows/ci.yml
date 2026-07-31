@@ -17,7 +17,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: go test ./...
+      - name: Test Wetrace
+        env:
+          PYTHONUTF8: "1"
+        run: python skills/wetrace/scripts/test_wetrace_api.py -v
       - name: Build wechat-cli (macOS)
         if: runner.os == 'macOS'
         env:
@@ -121,7 +128,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          foreach ($script in @(".\install.ps1", ".\scripts\install-release.ps1", ".\scripts\package-windows.ps1", ".\scripts\build-windows-wcdb.ps1")) {
+          foreach ($script in @(".\install.ps1", ".\scripts\install-release.ps1", ".\scripts\package-windows.ps1", ".\scripts\build-windows-wcdb.ps1", ".\scripts\wetrace.ps1", ".\scripts\install-wetrace-skill.ps1")) {
             $errors = $null
             [void][System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw -LiteralPath $script), [ref]$errors)
             if ($errors -and $errors.Count -gt 0) {

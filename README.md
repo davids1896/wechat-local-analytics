@@ -1,257 +1,247 @@
-# wechat-cli
+# wechat-local-analytics
 
-面向人和 AI agent 的本机微信数据 CLI。
+本地优先、只读的微信聊天记录 CLI 与 Agent 分析工具箱。
 
-它读取 macOS / Windows 上 WeChat 4.x 的本地数据库，将聊天、联系人、群聊、媒体、朋友圈、收藏、转账与红包整理为稳定 JSON。消息正文默认实时读取，不上传、不发送消息，也不控制微信界面。
+本仓库把两个层次放在一起：
 
-> 这是本地数据工具，不是微信机器人、公众号工具、Mini Program bridge 或 WeCom bot。
+- **wechat-cli**：读取本机 WeChat/微信 4.x 数据库，提供会话、消息、联系人、群成员、搜索和媒体元数据等结构化 JSON。
+- **Wetrace**：通过 `wechat-cli call-json` 获取数据，完成分页、统计、词频、成员排行、年度分析、导出和独立 HTML 仪表板。
 
-## 支持范围
+项目不会发送或删除微信消息，不会控制微信界面，也不需要非官方协议登录。数据读取与统计在本机完成；若把结果交给 Codex 或其他 Agent 做语义分析，数据处理边界取决于所使用的 Agent 平台与配置。
 
-- macOS arm64 + WeChat 4.x
-- Windows amd64 + Windows WeChat / Weixin 4.x
-- 文本、图片、视频、文件、链接、引用、合并转发、位置、语音
-- 会话、联系人、群成员、全文搜索、朋友圈、收藏、转账、红包
-- 紧凑 JSON、稳定分页、上下文展开、只读增量观察
+> [!IMPORTANT]
+> CLI 的数据库访问可以保持只读，但登录、打开聊天或播放媒体的官方桌面微信可能同步手机端已读状态。若未读红点很重要，优先使用离线数据副本，并避免为了取密钥而打开相应会话。
 
-微信需要保持登录，并至少打开过一个聊天。
+## 功能
 
-## 安装
+### wechat-cli 数据层
 
-### macOS
+- Windows amd64 与 macOS arm64 的 WeChat/微信 4.x 本地数据库读取
+- 会话、联系人、群成员、聊天时间线和全文搜索
+- 消息上下文、未读会话、收藏、转账、红包和朋友圈数据
+- 文本、图片、视频、文件、语音、链接、引用和合并转发等消息类型
+- 稳定 JSON、分页游标和适合 Agent 的标准消息结构
+- `--strict-read-only` 严格只读模式
+- Windows 密钥扫描增强：
+  - ASCII raw-key 字面量
+  - UTF-16 raw-key 字面量
+  - 数据库 salt 相邻的 32 字节二进制候选
+  - 候选去重、数量上限和真实数据库逐项验证
+  - 详细扫描诊断
 
-```bash
-curl -fsSL https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.sh | zsh
-~/.local/share/wechat-cli/wxkey bootstrap
-wechat-cli agent --pretty
+### Wetrace 分析层
+
+- 查询会话、联系人、群成员和聊天记录
+- 按联系人、群、发送者、时间、关键词和消息类型过滤
+- 日、周、月、小时活跃度
+- 消息类型分布、群成员发言排行
+- 重复短消息和基础词频
+- 最近最活跃联系人/群排行
+- 年度统计和月度趋势
+- JSON、CSV、TXT 和 HTML 导出
+- 独立 HTML 仪表板
+- Codex skill，可直接用自然语言要求 Agent 分析微信记录
+- 每份跨会话结果明确报告会话上限、消息上限、失败会话和截断状态
+
+## 仓库结构
+
+```text
+cmd/                         wechat-cli 命令
+internal/                    数据库、密钥、媒体和查询实现
+skills/wetrace/              Wetrace Codex skill 与 Python 分析器
+scripts/wetrace.ps1          Wetrace PowerShell 入口
+scripts/install-wetrace-skill.ps1
+docs/WINDOWS_QUICKSTART.md   Windows 详细安装说明
+docs/WETRACE_USAGE.md        Wetrace 完整使用示例
+docs/ARCHITECTURE.md         架构与安全边界
+docs/UPSTREAM_WECHAT_CLI.md  上游 wechat-cli 原始完整文档
 ```
 
-首次执行 `wxkey bootstrap` 可能会退出并重新打开微信，并通过本机隐藏窗口请求管理员密码。为支持后续无人值守刷新，当前实现会将经 sudo 验证的密码存入当前用户 Keychain；密码不要粘贴给 agent、网页或终端日志。不接受这一取舍时请取消引导。安装完成后，建议在 **系统设置 → 隐私与安全性 → 完全磁盘访问权限** 中加入：
+## 快速开始
 
-- `~/.local/share/wechat-cli/wechat-cli`
-- `~/.local/share/wechat-cli/wxkey`
+### 1. 准备环境
 
-### Windows
+Windows 推荐：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wechat-cli/releases/latest/download/install-release.ps1 | iex"
+winget install --id GoLang.Go --exact
+python --version
+git --version
+```
+
+仓库当前使用 Go `1.26.5`。Wetrace 只依赖 Python 标准库，推荐 Python 3.10 或更高版本。
+
+### 2. 克隆仓库
+
+```powershell
+git clone https://github.com/davids1896/wechat-local-analytics.git
+cd wechat-local-analytics
+```
+
+### 3. 安装 wechat-cli
+
+`wechat-cli` 运行时需要 `libWCDB.dll`。本仓库不提交第三方二进制文件。
+
+若电脑上已经安装上游 `wechat-cli`，可以复用其 DLL：
+
+```powershell
+$env:WECHAT_CLI_WCDB_LIB = "$env:LOCALAPPDATA\wechat-cli\libWCDB.dll"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Yes -Json
+```
+
+若尚未安装，请先阅读 [Windows 快速开始](docs/WINDOWS_QUICKSTART.md)，其中包含获取 WCDB DLL、设置数据目录和首次密钥读取的完整步骤。
+
+### 4. 设置微信数据目录
+
+`WECHAT_CLI_DB_ROOT` 必须指向**直接包含 `db_storage` 的账号目录**：
+
+```powershell
+$env:WECHAT_CLI_DB_ROOT = 'D:\WeChatData\xwechat_files\<账号目录>'
+Get-ChildItem "$env:WECHAT_CLI_DB_ROOT\db_storage"
+```
+
+长期使用可以写入当前用户环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  'WECHAT_CLI_DB_ROOT',
+  'D:\WeChatData\xwechat_files\<账号目录>',
+  'User'
+)
+```
+
+### 5. 首次读取密钥
+
+首次密钥获取需要官方桌面微信保持登录。执行前请先了解可能的已读同步影响。
+
+```powershell
 wechat-cli cache refresh --force
-wechat-cli agent --pretty
 ```
 
-Windows 首次刷新时请保持微信登录，并打开一个普通聊天。
+Windows 密钥读取属于实验性兼容功能。不能仅凭安装成功判断可用，必须依次通过下面三个验收门：
 
-默认只安装 CLI，不注册外部 agent 协议，也不安装后台 watcher。安装位置：
-
-- macOS：`~/.local/share/wechat-cli`
-- Windows：`%LOCALAPPDATA%\wechat-cli`
-
-## Agent 快速开始
-
-先检查环境，不要先手动刷新缓存：
-
-```bash
-wechat-cli agent --pretty
+```powershell
 wechat-cli status --pretty
-wechat-cli tools
+wechat-cli sessions --limit 10 --pretty
+wechat-cli timeline "一个真实会话名称" --limit 10 --pretty
 ```
 
-正常阅读从 `sessions → resolve-chat → timeline` 开始：
+只有第三步返回真实消息正文，才算读取链路完整可用。
 
-```bash
-wechat-cli sessions --type-filter private,group --limit 20
-wechat-cli resolve-chat "聊天名"
-wechat-cli timeline "聊天名" --limit 50
+### 6. 使用 Wetrace
+
+先检查连接：
+
+```powershell
+.\scripts\wetrace.ps1 doctor
 ```
 
-`timeline` 默认查询最新消息，再按时间正序展示。继续翻旧消息时，优先使用 `data.query.cursor.next_before_message`：
+查看会话和消息：
 
-```bash
-wechat-cli timeline "聊天名" --before-message 123 --limit 50
+```powershell
+.\scripts\wetrace.ps1 sessions --keyword "项目" --limit 20
+.\scripts\wetrace.ps1 messages --talker "项目群" --time-range "last_7_days" --limit 100
 ```
 
-搜索后展开上下文：
+生成统计：
 
-```bash
-wechat-cli search "关键词" --in "聊天名" --limit 10
-wechat-cli context "聊天名" --local-id 123 --before-count 10 --after-count 10
-wechat-cli search-context "关键词" --in "聊天名" --context-limit 3
+```powershell
+.\scripts\wetrace.ps1 analysis summary "项目群" --time-range "last_30_days" --max-messages 20000
+.\scripts\wetrace.ps1 analysis member "项目群" --time-range "last_7_days"
+.\scripts\wetrace.ps1 analysis top_contacts --time-range "last_30_days" --session-limit 100 --max-messages-per-chat 5000
+.\scripts\wetrace.ps1 analysis annual --year 2026 --session-limit 100 --max-messages-per-chat 20000
 ```
 
-增量观察不会发消息，也不会控制微信 UI：
+生成网页仪表板：
 
-```bash
-wechat-cli tail "聊天名" --since-local-id 123
-wechat-cli tail "聊天名" --cursor local_id:456 --jsonl
-wechat-cli watch --mode sessions --jsonl --follow
+```powershell
+.\scripts\wetrace.ps1 dashboard --talker "项目群" --time-range "last_30_days" --html
 ```
 
-每次调用都应检查：
+更多命令、时间范围、导出方式和自然语言示例见 [Wetrace 使用手册](docs/WETRACE_USAGE.md)。
 
-- `ok`：调用是否成功
-- `data.query.has_more` 与 cursor：是否需要继续分页
-- `data.freshness`：数据来源与完整性
-- `data.warnings` / `error`：缓存滞后、局部缺 key、媒体补齐失败等诊断
+## 安装为 Codex Skill
 
-## 输出契约
-
-stdout 默认是一行紧凑 JSON。人工查看加 `--pretty`。
-
-成功：
-
-```json
-{"ok":true,"tool":"chat_timeline","command":"timeline","data":{"query":{},"freshness":{},"messages":[]}}
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-skill.ps1
 ```
 
-失败：
+如果目标目录已存在且确认需要覆盖：
 
-```json
-{"ok":false,"error":{"code":"tool_error","message":"...","next_action":"..."}}
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-skill.ps1 -Force
 ```
 
-列表字段即使为空也保持为数组，适合 agent 稳定解析。只有 `tail/watch --jsonl` 与 `--follow` 输出 JSONL 事件流，不套标准 envelope。
+安装后在新的 Codex 任务中可以直接提出：
 
-通用调用接口：
-
-```bash
-wechat-cli tool-schema timeline
-wechat-cli tools --profile all
-wechat-cli call timeline --chat "聊天名" --limit 20
-jq -n --arg chat "聊天名" '{chat:$chat,limit:20}' | wechat-cli call-json timeline
+```text
+用 Wetrace 查看“项目群”最近一周的聊天，按时间正序排列。
+总结我和“张三”最近一个月聊了什么，并注明读取范围。
+统计“项目群”近 30 天的成员发言排行。
+生成最近 90 天最活跃的 20 个会话。
+为“张三”生成最近 30 天的 HTML 仪表板。
 ```
-
-默认 schema 只显示高信噪比 canonical 参数；兼容 alias、维护与 debug 参数在 `--profile all` 中。
-
-## 常用命令
-
-| 命令 | 用途 |
-| --- | --- |
-| `agent` / `status` | 能力矩阵、本机 readiness、恢复动作 |
-| `tools` / `tool-schema` | agent 工具面与参数 schema |
-| `sessions` / `unread` | 最近会话与未读状态 |
-| `resolve-chat` | 将昵称、备注或群名解析为稳定 talker |
-| `timeline` | 阅读聊天的默认入口 |
-| `context` | 以消息 ID 展开前后文 |
-| `search` / `search-context` | 本地全文搜索与上下文展开 |
-| `tail` / `watch` | 只读增量消息、会话事件 |
-| `media` | 图片、视频、文件的可读本机路径 |
-| `members` | 群成员与群名片 |
-| `favorites` | 微信收藏 |
-| `sns-feed` / `sns-search` | 朋友圈时间线与搜索 |
-| `transfers` / `red-packets` | 转账与红包记录 |
-| `export` | 显式导出单个聊天到 JSONL / Markdown / HTML |
-| `schema` / `sql` | 只读数据库诊断 |
-| `cache status` | 元数据缓存诊断 |
-| `update` | 更新到最新 GitHub release |
-
-典型消息行：
-
-```json
-{
-  "id": {"local_id": 123, "server_id_str": "9876543210", "talker": "xxx@chatroom"},
-  "time_iso": "2026-05-26T13:00:00+08:00",
-  "sender": "Room Nickname",
-  "sender_wxid": "wxid_alice",
-  "sender_group_nickname": "Room Nickname",
-  "sender_contact_display": "Alice",
-  "is_from_me": false,
-  "kind": "image",
-  "text": "[图片]",
-  "images": [{"path": "/Users/me/.wechat-cli/media-cache/xxx.jpg"}]
-}
-```
-
-群消息优先使用可可靠解析的群内昵称作为 `sender`。`sender_wxid` 保留稳定身份，
-`sender_contact_display` 与 `sender_group_nickname` 仅在对应信息可可靠解析时返回。
-
-默认只返回人能在微信里看到、且 agent 可直接使用的信息。raw XML、CDN key、协议码、不可读 `.dat` 与候选路径只在 debug/full 输出中出现。
 
 ## 严格只读
 
-普通读取不会修改微信数据库，但可能刷新本地 metadata/key、解码图片或缓存语音转写。需要连这些辅助写入也禁用时：
+Wetrace 每次调用 `wechat-cli` 时都会设置：
 
-```bash
-wechat-cli --strict-read-only timeline "聊天名" --limit 20
-WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
+```text
+WECHAT_CLI_STRICT_READ_ONLY=1
 ```
 
-严格只读会禁用：
+这会禁止 `wechat-cli` 自动刷新元数据/密钥、写媒体解码缓存、写语音转写缓存以及执行 CLI 自带的导出操作。
 
-- metadata / key 自动刷新
-- 图片解码与语音转写缓存
-- `cache refresh/rebuild`
-- `export`
+Wetrace 自己仍可在用户明确要求时，把分析结果写入 `~/wetrace-exports/` 或指定路径。它不会修改微信数据库。
+
+首次获取数据库密钥、刷新名称索引和媒体解密密钥不属于严格只读流程，应单独执行，并了解官方客户端可能产生的同步行为。
 
 ## 图片与语音
 
-图片、视频和文件默认返回可直接读取的本机 `path`。本地 `.dat` 图片会尽力解码到 `~/.wechat-cli/media-cache`；失败时返回 warning，不把不可读文件伪装成图片。
+- Wetrace 默认只统计图片和语音类型，不主动读取媒体内容。
+- 图片解密可能依赖当前账号的 `image_key` 或 `image_xor_key`，缺失时普通模式可尝试刷新并写入本地媒体缓存。
+- 严格只读模式不会刷新图片密钥或写解码缓存。
+- 语音转写是可选功能，使用本地 `faster-whisper` 与 SILK 解码器，不上传音频。
+- 未落盘或缺少可用解码链路的语音只能统计数量和时长，不能推测内容。
 
-语音转写是可选能力：
+## 数据范围与截断
 
-```bash
-wechat-cli asr setup --model large-v3
-wechat-cli asr status --pretty
+单会话和跨会话分析都有读取上限。任何报告都应检查：
+
+```text
+scope.truncated
+scope.sessions_truncated
+scope.truncated_chat_count
+scope.failed_chat_count
+scope.total_messages_scanned
 ```
 
-它会创建 `~/.wechat-cli/asr-venv`，安装 `faster-whisper` 与 `silk-python`。模型、语言、device 与 compute type 会持久化到本机 ASR 配置。首次模型下载可能占用数 GB；只安装依赖可加 `--skip-model-download`。
+当 `scope.truncated=true` 时，结果是当前扫描范围内的统计或下界，不能表述为账号全量结论。
 
-## 微信助手
-
-```bash
-wechat-cli companion
-```
-
-`companion` 默认只监听 `127.0.0.1:18789`，启动时生成一次随机 bearer token，并通过 URL fragment 交给自动打开的本机窗口；未认证首页不包含 token。
-
-远程监听必须显式传 `--allow-remote`，并自行提供 TLS 或 SSH tunnel。不要把远程 Companion 直接暴露到公网。它是否调用云端模型由后端 CPU 决定；CLI 本身不保存模型密钥。
-
-## 更新与清理
-
-```bash
-wechat-cli update
-wechat-cli update --dry-run
-```
-
-更新器下载 latest release，校验 sha256，并保留当前自定义安装目录。
-
-清理前先 dry-run：
-
-```bash
-./install.sh --clear-state --dry-run --json
-./install.sh --uninstall --purge-state --dry-run --json
-```
-
-Windows：
+## 开发与测试
 
 ```powershell
-.\install.ps1 -ClearState -DryRun -Json
-.\install.ps1 -Uninstall -PurgeState -DryRun -Json
+& 'C:\Program Files\Go\bin\go.exe' test ./...
+$env:PYTHONUTF8 = '1'
+python .\skills\wetrace\scripts\test_wetrace_api.py -v
 ```
 
-危险目录会被拒绝；卸载只删除受管理的安装目录。`--purge-state` 会额外清除本机 key/config/cache/log 与托管凭据。
-
-## 排障
-
-| 现象 | 处理 |
-| --- | --- |
-| `readiness=degraded` | 查看 `status.data.status.warnings`；缓存滞后不等于聊天正文滞后 |
-| 名字解析失败或有重名 | 先运行 `resolve-chat`，再把返回的 raw username 传给 `--chat/--talker` |
-| 某个聊天缺 key | 在微信中打开对应聊天，随后由 agent 重跑 `wxkey bootstrap` / `doctor` |
-| macOS 频繁弹隐私授权 | 给安装目录中的 `wechat-cli` 与 `wxkey` 加 Full Disk Access |
-| 图片只有 warning | 在微信中打开原图后重试，并检查 image-key 诊断 |
-| Windows 首次刷新失败 | 确认微信登录，且 `WECHAT_CLI_DB_ROOT` 直接包含 `db_storage` |
-| `zsh: killed`，连 `--help` 都失败 | 重新运行 release bootstrap；旧二进制可能无法自更新 |
-
-更完整的 Windows 说明见 [docs/WINDOWS_USER_GUIDE.md](docs/WINDOWS_USER_GUIDE.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要在公开 issue 附上 key、数据库、聊天导出或日志。
-
-## 开发
+测试不读取真实聊天记录。真实读取回归脚本会生成含聊天内容的本地产物，只有在显式设置测试会话和关键词时才运行：
 
 ```bash
-go test ./...
-go vet ./...
-go test -race ./...
+WECHAT_READ_TEST_CHAT="测试群" \
+WECHAT_READ_TEST_KEYWORD="可命中的关键词" \
+scripts/wechat-read-regression.sh
 ```
 
-发布包必须从与 `appVersion` 一致的干净 tag 构建；打包脚本会校验版本、架构、WCDB 导出与产物身份。
+不要上传该脚本产生的目录。
 
-许可证与第三方组件见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+## 来源与许可证
+
+本仓库保留 `r266-tech/wechat-cli` 的 Git 历史，并在其基础上增加 Windows 密钥扫描改进和 Wetrace 分析层。
+
+Wetrace 的产品方向和分析类别参考了 `afumu/wetrace-skill`，本仓库不包含其原服务端实现，数据适配器改为直接调用本地 `wechat-cli`。
+
+代码使用 MIT License。第三方组件与署名见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+本项目与腾讯、微信官方无关联。“微信”和“WeChat”是其各自权利人的商标。

@@ -1,17 +1,42 @@
 # Third-Party Notices
 
-wechat-cli source code does not commit third-party binary libraries.
+## r266-tech/wechat-cli
 
-Release zips may bundle `libWCDB.dylib` / `libWCDB.dll` so the CLI can load Tencent WCDB at runtime. WCDB is an upstream Tencent project; see its repository and license:
+This repository preserves the Git history and substantial source code of:
+
+- https://github.com/r266-tech/wechat-cli
+
+The upstream project is licensed under the MIT License. Its copyright notice is
+preserved in this repository's `LICENSE`.
+
+## afumu/wetrace-skill
+
+The Wetrace product direction and report categories were informed by:
+
+- https://github.com/afumu/wetrace-skill
+
+This repository does not bundle that project's original HTTP service. The
+included Python adapter was developed to call local `wechat-cli call-json`
+directly and to enforce strict read-only database access.
+
+## Tencent WCDB
+
+Source code does not commit third-party binary libraries.
+
+Release or local installations may use `libWCDB.dylib` / `libWCDB.dll` so the
+CLI can load Tencent WCDB at runtime:
 
 - https://github.com/Tencent/wcdb
 - https://github.com/Tencent/wcdb/blob/master/LICENSE
 
-`libWCDB.dylib` / `libWCDB.dll` is loaded locally by wechat-cli for read-only access to the user's own WeChat databases.
+The WCDB library is loaded locally for read-only access to the user's own WeChat
+databases.
 
-Optional voice transcription setup (`wechat-cli asr setup` or installer
-`--with-asr`) creates a user-local Python virtualenv and downloads packages from
-PyPI. These packages are not bundled in wechat-cli release zips:
+## Optional voice transcription
 
-- `faster-whisper` for local ASR.
-- `silk-python` / `pysilk` for local WeChat SILK decode fallback.
+`wechat-cli asr setup` may create a user-local Python virtual environment and
+download packages from PyPI. These packages are not committed to this
+repository:
+
+- `faster-whisper` for local ASR
+- `silk-python` / `pysilk` for local WeChat SILK decoding
