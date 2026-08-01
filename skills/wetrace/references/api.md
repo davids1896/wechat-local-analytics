@@ -6,6 +6,9 @@
 `.wetrace-offline-copy.json` 完成标记的离线账号目录。Wetrace 不读取外部
 `WECHAT_CLI_DB_ROOT` 指定的在线目录。
 
+若目录存在 `.wetrace-offline-copy.updating.json`，表示滚动副本正在更新或上次更新
+未完成，所有查询都会拒绝运行。退出微信并重新执行离线副本的 `-Incremental` 更新命令。
+
 ## 查询
 
 - `doctor`

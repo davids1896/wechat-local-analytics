@@ -10,6 +10,7 @@ description: "基于本机 wechat-cli 查询、搜索、统计、分析和导出
 ## 安全边界
 
 - 只允许读取带 `.wetrace-offline-copy.json` 标记的离线数据库副本。
+- `.wetrace-offline-copy.updating.json` 存在时视为更新中或更新失败，拒绝读取。
 - 必须通过 `WETRACE_OFFLINE_DB_ROOT` 指定副本；忽略可能指向在线目录的 `WECHAT_CLI_DB_ROOT`。
 - 数据库访问始终设置 `WECHAT_CLI_STRICT_READ_ONLY=1`。
 - 不发送、删除、修改或标记消息。

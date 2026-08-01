@@ -93,14 +93,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Yes -Json
 
 ### 4. 创建并设置离线数据副本
 
-Wetrace 不直接读取微信正在使用的数据目录。先从托盘彻底退出微信，再创建离线副本：
+Wetrace 不直接读取微信正在使用的数据目录。先从托盘彻底退出微信，再创建滚动离线副本：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
   -SourceAccountRoot 'G:\微信文件\xwechat_files\<账号目录>' `
   -DestinationRoot 'G:\微信离线副本' `
+  -Incremental `
   -SetUserEnvironment
 ```
+
+第一次会完整复制 `db_storage`，以后重复运行同一命令只同步新增、变化和删除的数据库文件。
+滚动副本固定写入 `<账号目录>-rolling`。这是文件级增量：一个 SQLite/WCDB 文件发生变化时，
+仍需重新复制整个文件。
+
+创建或更新时微信必须保持退出，因为主数据库、WAL 和共享内存文件需要来自同一个静止时刻。
+更新开始后完成标记会暂时撤销；若复制失败、中断或微信中途启动，Wetrace 会拒绝读取该目录。
+退出微信后重新运行同一命令即可续跑。
+
+不传 `-Incremental` 时，脚本仍会创建一个新的带时间戳完整快照。
 
 重新打开 PowerShell 后确认：
 

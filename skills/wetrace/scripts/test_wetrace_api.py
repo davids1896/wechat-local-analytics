@@ -169,6 +169,31 @@ class OfflineSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(wetrace.WetraceError, "缺少安全标记"):
                 wetrace.validate_offline_db_root(str(root))
 
+    def test_rejects_snapshot_while_incremental_update_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "account"
+            (root / "db_storage").mkdir(parents=True)
+            updating = {
+                "format_version": 1,
+                "status": "updating",
+                "source_account_root": str(Path(directory) / "live-account"),
+            }
+            (root / wetrace.OFFLINE_UPDATING_MARKER).write_text(
+                json.dumps(updating),
+                encoding="utf-8",
+            )
+            completed = {
+                "format_version": 1,
+                "status": "complete",
+                "source_account_root": str(Path(directory) / "live-account"),
+            }
+            (root / wetrace.OFFLINE_MARKER).write_text(
+                json.dumps(completed),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(wetrace.WetraceError, "正在更新或上次更新未完成"):
+                wetrace.validate_offline_db_root(str(root))
+
 
 class AnalysisTests(unittest.TestCase):
     def test_top_contacts_reports_scope_and_sorting(self):

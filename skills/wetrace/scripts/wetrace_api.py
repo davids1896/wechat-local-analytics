@@ -56,6 +56,7 @@ STOP_WORDS = {
 }
 
 OFFLINE_MARKER = ".wetrace-offline-copy.json"
+OFFLINE_UPDATING_MARKER = ".wetrace-offline-copy.updating.json"
 OFFLINE_SOURCE = "wechat-cli/offline-db-copy"
 
 
@@ -115,6 +116,11 @@ def validate_offline_db_root(value: str | None = None) -> tuple[Path, dict[str, 
     root = Path(raw).expanduser().resolve()
     if not (root / "db_storage").is_dir():
         raise WetraceError(f"离线副本目录不包含 db_storage: {root}")
+    updating_marker = root / OFFLINE_UPDATING_MARKER
+    if updating_marker.is_file():
+        raise WetraceError(
+            f"离线副本正在更新或上次更新未完成；请在微信退出后重新运行增量更新脚本: {root}"
+        )
     marker_path = root / OFFLINE_MARKER
     if not marker_path.is_file():
         raise WetraceError(f"离线副本缺少安全标记 {OFFLINE_MARKER}: {root}")

@@ -10,12 +10,20 @@ Wetrace 不接受微信正在使用的在线目录。先从托盘彻底退出微
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
   -SourceAccountRoot 'G:\微信文件\xwechat_files\<账号目录>' `
   -DestinationRoot 'G:\微信离线副本' `
+  -Incremental `
   -SetUserEnvironment
 ```
 
-脚本会在确认 `Weixin`/`WeChat` 进程均已退出后复制 `db_storage`，创建带时间戳的新目录，
-并在复制成功后写入 `.wetrace-offline-copy.json`。复制过程中若微信重新启动，目录不会被
-标记为安全副本。
+`-Incremental` 使用固定的 `<账号目录>-rolling` 目录。第一次完整复制 `db_storage`，
+以后重复运行同一命令只同步新增、变化和删除的文件。它是文件级增量，不是消息行级增量：
+只要一个 SQLite/WCDB 文件发生变化，就需要重新复制整个文件。
+
+脚本会确认 `Weixin`/`WeChat` 进程均已退出。主数据库、`.db-wal` 和 `.db-shm` 必须来自
+同一个静止时刻，否则顺序复制得到的文件可能互不一致。更新开始时脚本会撤销完成标记；
+只有复制完成、源目录未变化、目标清单一致并再次确认微信仍未启动后，才原子写入
+`.wetrace-offline-copy.json`。失败或中断后，退出微信并重新运行同一命令即可续跑。
+
+不传 `-Incremental` 时，脚本会创建新的带时间戳完整快照。
 
 重新打开 PowerShell 后，初始化离线副本自己的元数据缓存：
 
@@ -304,6 +312,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-sk
 ## 11. 数据和隐私边界
 
 - Wetrace 只读取带完成标记的离线副本。
+- 滚动副本更新期间或上次更新未完成时，Wetrace 拒绝读取。
 - Wetrace 强制用 `WETRACE_OFFLINE_DB_ROOT` 覆盖 `WECHAT_CLI_DB_ROOT`。
 - Wetrace 总是用 `WECHAT_CLI_STRICT_READ_ONLY=1` 调用数据层。
 - 不发送、删除或标记消息。
@@ -319,6 +328,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-wetrace-sk
 ### 缺少离线副本
 
 运行第 1 节的副本创建命令。不要手工伪造 `.wetrace-offline-copy.json`。
+
+### 离线副本正在更新或上次更新未完成
+
+确保 Wetrace 没有正在执行的长查询，从托盘彻底退出微信，然后重新运行第 1 节的
+`-Incremental` 命令。脚本会继续同步并在校验成功后恢复完成标记。
 
 ### 找不到 wechat-cli
 

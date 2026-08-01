@@ -185,8 +185,12 @@ wechat-cli --strict-read-only timeline "会话名称" --limit 50 --pretty
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-offline-copy.ps1 `
   -SourceAccountRoot $env:WECHAT_CLI_DB_ROOT `
   -DestinationRoot 'G:\微信离线副本' `
+  -Incremental `
   -SetUserEnvironment
 ```
+
+第一次会完整复制数据库；以后在微信退出时重复运行同一命令，只同步发生变化的数据库文件。
+更新期间完成标记会被撤销，因此 Wetrace 不会读取半更新状态。
 
 重新打开 PowerShell 后：
 
