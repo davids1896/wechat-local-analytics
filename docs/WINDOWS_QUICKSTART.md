@@ -195,12 +195,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-off
 重新打开 PowerShell 后：
 
 ```powershell
+$offline = [Environment]::GetEnvironmentVariable('WETRACE_OFFLINE_DB_ROOT', 'User')
+$env:WETRACE_OFFLINE_DB_ROOT = $offline
+$env:WECHAT_CLI_DB_ROOT = $offline
+$env:WECHAT_CLI_STATE_DIR = Join-Path $offline '.wechat-cli-state'
+wechat-cli cache refresh --force --pretty
+Remove-Item Env:WECHAT_CLI_DB_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:WECHAT_CLI_STATE_DIR -ErrorAction SilentlyContinue
+
 .\scripts\wetrace.ps1 doctor
 .\scripts\wetrace.ps1 sessions --limit 20
 .\scripts\wetrace.ps1 messages --talker "会话名称" --time-range "last_7_days" --limit 100
 ```
 
 Wetrace 只读取 `WETRACE_OFFLINE_DB_ROOT` 指向的离线副本，并自动设置严格只读环境变量。
+完整的日常读取流程见 [如何读取微信聊天记录](READ_CHAT_HISTORY.md)。
 
 ## 10. 常见问题
 

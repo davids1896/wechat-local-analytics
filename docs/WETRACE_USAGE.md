@@ -25,15 +25,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-wetrace-off
 
 不传 `-Incremental` 时，脚本会创建新的带时间戳完整快照。
 
-重新打开 PowerShell 后，初始化离线副本自己的元数据缓存：
+重新打开 PowerShell 后，初始化离线副本自己的元数据缓存。首次创建以及每次更新副本后都应执行：
 
 ```powershell
-$env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
-$env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
+$offline = [Environment]::GetEnvironmentVariable('WETRACE_OFFLINE_DB_ROOT', 'User')
+$env:WETRACE_OFFLINE_DB_ROOT = $offline
+$env:WECHAT_CLI_DB_ROOT = $offline
+$env:WECHAT_CLI_STATE_DIR = Join-Path $offline '.wechat-cli-state'
 wechat-cli cache refresh --force --pretty
+Remove-Item Env:WECHAT_CLI_DB_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:WECHAT_CLI_STATE_DIR -ErrorAction SilentlyContinue
 ```
 
 初始化时无需启动微信。若已有数据库密钥不足，命令会失败；不要为了分析而打开微信或聊天。
+清理两个临时变量后，Wetrace 会在自己的子进程中重新设置严格只读的离线目录。
+
+只需要查询聊天记录时，可直接按 [如何读取微信聊天记录](READ_CHAT_HISTORY.md) 的线性流程操作。
 
 ## 2. 启动方式
 
@@ -349,9 +356,11 @@ $env:WECHAT_CLI_BIN = "$env:LOCALAPPDATA\wechat-cli\wechat-cli.exe"
 $env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
 $env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
 wechat-cli cache refresh --force --pretty
+Remove-Item Env:WECHAT_CLI_DB_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:WECHAT_CLI_STATE_DIR -ErrorAction SilentlyContinue
 ```
 
-完成后再运行 Wetrace。微信应继续保持退出。
+完成并清理临时变量后再运行 Wetrace。微信应继续保持退出。
 
 ### 名称匹配错误
 

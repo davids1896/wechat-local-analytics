@@ -51,6 +51,7 @@ internal/                    数据库、密钥、媒体和查询实现
 skills/wetrace/              Wetrace Codex skill 与 Python 分析器
 scripts/wetrace.ps1          Wetrace PowerShell 入口
 scripts/install-wetrace-skill.ps1
+docs/READ_CHAT_HISTORY.md    从离线副本读取聊天记录的操作指南
 docs/WINDOWS_QUICKSTART.md   Windows 详细安装说明
 docs/WETRACE_USAGE.md        Wetrace 完整使用示例
 docs/ARCHITECTURE.md         架构与安全边界
@@ -58,6 +59,10 @@ docs/UPSTREAM_WECHAT_CLI.md  上游 wechat-cli 原始完整文档
 ```
 
 ## 快速开始
+
+> 只想按步骤读取联系人或群聊记录，请直接阅读
+> [如何读取微信聊天记录](docs/READ_CHAT_HISTORY.md)。该文档包含离线副本更新、
+> 会话查找、时间正序、关键词搜索、上下文、分页、导出和常见错误。
 
 ### 1. 准备环境
 
@@ -126,16 +131,21 @@ Wetrace 只认 `WETRACE_OFFLINE_DB_ROOT`，并要求目录中存在复制完成�
 
 ### 5. 初始化离线副本
 
-首次建立副本后，可在微信保持退出的情况下初始化该副本的元数据缓存：
+首次建立以及每次更新副本后，可初始化该副本的元数据缓存：
 
 ```powershell
+$offline = [Environment]::GetEnvironmentVariable('WETRACE_OFFLINE_DB_ROOT', 'User')
+$env:WETRACE_OFFLINE_DB_ROOT = $offline
 $env:WECHAT_CLI_DB_ROOT = $env:WETRACE_OFFLINE_DB_ROOT
 $env:WECHAT_CLI_STATE_DIR = Join-Path $env:WETRACE_OFFLINE_DB_ROOT '.wechat-cli-state'
 wechat-cli cache refresh --force --pretty
+Remove-Item Env:WECHAT_CLI_DB_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:WECHAT_CLI_STATE_DIR -ErrorAction SilentlyContinue
 ```
 
 上述操作只读取离线副本并写入副本自己的辅助状态目录。如果已有密钥不足，它会失败；
 不要为了补密钥启动微信或打开聊天，以免再次影响未读状态。
+最后两行会清理初始化时使用的临时变量，避免 Wetrace 将该窗口误判为直接配置了在线目录。
 
 原始 `wechat-cli` 若需首次从官方客户端提取密钥，可能要求微信保持登录。
 
